@@ -20,3 +20,9 @@ node_modules/
 .DS_Store
 .idea/
 .vscode/
+
+# 运行时产物
+.workflow-controller/
+/workflow-controller.yaml
+/workflow-controller-config.yaml
+workflow-controller.db
