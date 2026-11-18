@@ -4,7 +4,7 @@
 
 本文规定何时使用哪类模板，以及评审、实现、发布和归档的最低门槛。
 
-文档目录结构见 [`docs/README.md`](./README.md)；`ARCHITECTURE.md` 是当前架构事实来源，固定保留在 `docs/` 根目录。
+文档目录结构见 `docs/` 各篇；`ARCHITECTURE.md` 是当前架构事实来源，固定保留在 `docs/` 根目录。
 
 ## 1. 先判断改动等级
 
@@ -18,7 +18,7 @@
 | 架构 | 不改变边界 | 局部扩展 | 改变进程、包、仓库或核心职责 |
 | 运行风险 | 易回滚 | 有明确回滚 | 可能影响所有 run、预算、门禁或生产可用性 |
 
-模板文件见 [`docs/templates/`](./templates/)。分级只决定需要哪些交付物，不要求每次变更创建全部模板。
+分级只决定需要哪些交付物，不要求每次变更创建全部交付物。
 
 ## 2. 紧急修复流程
 
@@ -30,7 +30,7 @@
 
 紧急修复可以暂时跳过普通设计评审，但必须保留变更原因、风险、验证和回滚证据，并在 2 个工作日内补齐设计/ADR（如适用）和复盘记录。
 
-相关模板：事后补齐时使用 [`design-template.md`](./templates/design-template.md)、[`adr-template.md`](./templates/adr-template.md) 和 [`postmortem-template.md`](./templates/postmortem-template.md)（复盘记录）。
+相关交付：事后补齐设计或 ADR，并附复盘记录。
 
 ## 3. 小修改流程
 
@@ -62,17 +62,17 @@ Issue → 功能说明 / Mini Design → 异步评审 → 拆任务 → 实现�
 
 必须交付：
 
-1. **功能说明 / Mini Design**：使用 [`design-template.md`](./templates/design-template.md) 的精简章节，控制在一页左右；至少包含背景、目标、非目标、用例、成功标准、方案概述和风险；
+1. **功能说明 / Mini Design**：精简设计文档，控制在一页左右；至少包含背景、目标、非目标、用例、成功标准、方案概述和风险；
 2. **实施任务**：任务、依赖、负责人和验收条件；
 3. **测试记录**：正常路径、边界、错误和兼容性；
 4. **PR 描述**：关联任务和验证证据。
 
 按需交付：
 
-- 涉及长期架构决定时，补 [`adr-template.md`](./templates/adr-template.md)；
+- 涉及长期架构决定时，补一份 ADR；
 - 涉及权限、敏感数据或外部网络时，在设计文档或 PR 描述中补安全检查。
 
-实施任务使用 [`implementation-template.md`](./templates/implementation-template.md)；测试记录和发布验证保留在 PR 中。
+测试记录和发布验证保留在 PR 中。
 
 评审建议：至少 1 名主要评审人；涉及另一个模块时，请该模块负责人或维护人参与。可以异步评论，不要求每次开会。存在未解决的高风险问题或必需 CI 失败时不能合并。
 
@@ -102,9 +102,9 @@ ADR 固化关键决定
 
 必须交付：
 
-1. **完整设计文档 / RFC**：使用 [`design-template.md`](./templates/design-template.md)，问题、目标/非目标、用例、约束、候选方案、选定方案、架构图、接口/数据模型、失败策略；
-2. **ADR**：使用 [`adr-template.md`](./templates/adr-template.md)，每个长期架构决定单独一份；
-3. **实施计划**：使用 [`implementation-template.md`](./templates/implementation-template.md)，记录阶段、任务、依赖、负责人、验收；
+1. **完整设计文档 / RFC**：包含问题、目标/非目标、用例、约束、候选方案、选定方案、架构图、接口/数据模型、失败策略；
+2. **ADR**：每个长期架构决定单独一份；
+3. **实施计划**：记录阶段、任务、依赖、负责人、验收；
 4. **测试与发布验证记录**：在 PR 中记录功能、集成、故障、性能、安全和可观测性证据；
 5. **评审记录**：保留在 PR review 中，包含结论、未决问题、决策人和批准状态；
 6. **完成后的架构总览更新**：直接更新 [`ARCHITECTURE.md`](./ARCHITECTURE.md)，并同步 ADR 状态。
