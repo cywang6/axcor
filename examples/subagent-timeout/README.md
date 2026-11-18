@@ -20,7 +20,7 @@ Watchdog 配置写在 `workflow-controller.yaml` 的 `watchdog:` 段，**选目�
 
 ## 前置
 
-- **opencode CLI + provider**（配方见 `docs/designs/opencode-support.md`）。
+- **opencode CLI + provider**（全局 `~/.config/opencode/opencode.json`，如 zai-anthropic + glm-5.2）。
 - **workflow-controller web**：`workflow-controller web --dev`。
 - **git 凭据**：本机已配好对 Context Bay 仓的写权限（HTTPS token 存 `~/.git-credentials`，或 SSH key 加到 gitcode）。
 

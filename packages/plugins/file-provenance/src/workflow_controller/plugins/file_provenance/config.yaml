@@ -1,0 +1,5 @@
+name: file_provenance
+version: "0.1.0"
+enabled: false
+max_file_bytes: 2097152
+poll_interval_seconds: 2.0

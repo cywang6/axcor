@@ -24,8 +24,8 @@
 
 - 装好 Workflow Controller 并起 web（`pip install -e ".[dev]"` → `.venv/bin/workflow-controller web`，端口 18600）。
 - graph plugin 默认启用；若曾关闭，Settings 里重新打开。
-- agent 节点走 `opencode` runtime，需配好全局 opencode provider（见
-  [`docs/designs/opencode-support.md`](../../docs/designs/opencode-support.md)）。
+- agent 节点走 `opencode` runtime，需配好全局 opencode provider
+  （`~/.config/opencode/opencode.json`）。
 
 ## 怎么跑
 

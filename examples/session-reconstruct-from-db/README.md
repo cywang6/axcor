@@ -68,7 +68,7 @@ cd examples/session-reconstruct-from-db
 worker 用真实 LLM（bailian-payg/glm-5.2）续跑。developer subagent 实际执行、写 impl.py，
 验证重建产物可被真实 opencode 消费。
 
-前置：确定性模式的前置 + opencode CLI + provider 配置（见 `docs/designs/opencode-support.md`）。
+前置：确定性模式的前置 + opencode CLI + 全局 provider 配置。
 
 `--live` 模式的 Phase 3 会等待真实 agent 写 impl.py（timeout=180s）。hint 注入在 replay
 **前**登记在 origin session（fork 继承），让 developer 启动时补充指令已前置进其系统 prompt。

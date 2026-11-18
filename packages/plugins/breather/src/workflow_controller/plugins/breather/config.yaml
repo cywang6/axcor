@@ -1,0 +1,24 @@
+name: breather
+enabled: false
+# 主代理阈值；100 时只采集用量，不自动交接（手动强制交接仍可用）。
+context_threshold_pct: 70
+# 子代理阈值；null 时沿用该会话的有效主代理阈值；100 时不自动交接。
+subagent_context_threshold_pct: null
+# 上下文窗口（tokens）。优先级：本字段 > claude 上报的 modelUsage.contextWindow > 默认 200000。
+# model 名带 [1m] 后缀时 cc 按 1M 跑并如实上报，不带 [1m] 时 cc 按 200k —— cc 已按模型变体
+# 上报正确窗口，本字段默认 1000000 与 [1m] 一致、仅作 web 可见可改的显式声明；清空则回落到
+# cc 上报值。换非 [1m] 模型时记得改这里（如普通 GLM-5.2 → 200000）。
+context_window: 1000000
+# handoff agent 的 prompt 模板文件路径——给 agent 的【指令】（盘点步骤/要写的文档结构/
+# 原则），【不是】交接产物本身；产物名由系统按会话 ID 和轮次生成。设了且可读 →
+# 用它代替内置默认 prompt；清空（null）→ 内置通用模板。相对路径相对 project_dir 解析。
+# 模板里 {handoff_filename} / {worker_session_id} 会被填，其他 {占位} 原样保留。
+handoff_prompt_path: null
+# 普通主代理接续模板。相对路径相对 project_dir 解析。
+continuation_prompt_path: null
+# 阶段一：等 worker 发 stop hook 的超时（watchdog）。worker 在 execute 阶段
+# 派大批 sub-agent，常十几分钟才停，给 30min。0=禁用 watchdog（无限等）。
+handoff_wait_stop_timeout: 1800
+# 阶段二：等 handoff agent 写完 handoff.md 的超时（wait_session_done）。
+# 实测写文件约 4min，给 10min 余量。0=无限等。
+handoff_agent_timeout: 600

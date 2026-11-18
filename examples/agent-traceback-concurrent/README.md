@@ -72,7 +72,7 @@ cd examples/agent-traceback-concurrent
 
 ## Live 跑法（端到端含 LLM）
 
-1. **opencode CLI + provider**：bailian-payg + glm-5.2，配方见 `docs/designs/opencode-support.md`。
+1. **opencode CLI + provider**：bailian-payg + glm-5.2（全局 `~/.config/opencode/opencode.json`）。
 2. **workflow-controller web 起好**：`.venv/bin/workflow-controller web`。
 3. 安装 agents：`mkdir -p .opencode/agents && cp agents/*.md .opencode/agents/`。
 4. **展开 Quick Settings → 开 Traceback**：Dashboard → Quick Settings → 点「Traceback」

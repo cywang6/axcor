@@ -5,8 +5,6 @@
 阶段产物不许结束。任务用一个小而具体的「罗马数字转换器」，让 spec→retrospect 五阶段
 产出有意义、各不同的产物。
 
-机制与「门禁 vs reviewer」关系见 [`docs/designs/stage-gating.md`](../../docs/designs/stage-gating.md)。
-
 ## 与其他 example 的区别
 
 | | getting-started | **本 example** |
@@ -49,8 +47,8 @@ worker 读 `sample-project/README.md` 的任务说明，按五阶段推进，产
 | worker 想收尾但 5 个产物没齐 | **完成门** block | 点名「当前应推进：`spec`」（或当前缺的那个），退不出去 |
 | 5 个产物全过门禁 | 完成门放行 | 落到通用 reviewer 判真实性 → `let_exit` → loop `COMPLETED` |
 
-> 门禁只在 **iteration 边界**生效：单次 agent-loop 内的跳步要等下一轮边界才发现
-> （见设计文档 §4.4）。想看「跳步→block→补全→放行」的确定性证明，跑
+> 门禁只在 **iteration 边界**生效：单次 agent-loop 内的跳步要等下一轮边界才发现。
+> 想看「跳步→block→补全→放行」的确定性证明，跑
 > `pytest tests/workflow_controller_core/unit/test_stages.py tests/workflow_controller_core/unit/test_staged_pipeline_plugin.py -q`（不耗 LLM）。
 
 ## 目录
@@ -76,4 +74,4 @@ rm -rf spec.md plan.md impl verify.md retro.md .workflow-controller .claude
 ## 换领域
 
 改 `workflow-controller.yaml` 的 `stages`（阶段名 / artifact / 门禁模式 / command）+ `starting_prompt`
-+ `reviewer.task_goal` 即可——零动核心、零 plugin 复制。详见设计文档 §5.4。
++ `reviewer.task_goal` 即可——零动核心、零 plugin 复制。

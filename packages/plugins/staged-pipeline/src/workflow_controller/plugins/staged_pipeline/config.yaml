@@ -1,0 +1,8 @@
+name: staged_pipeline
+version: "0.1.0"
+enabled: false
+
+# staged_pipeline 是纯门禁执行器：stages 不在这里，在**项目 workflow-controller.yaml** 的 stages:。
+# 本文件只控制 enabled（是否全局挂载这道门禁逻辑）——没声明 stages 的 session 门禁惰性。
+# migbot 5 阶段的完整可跑样例见 examples/staged-pipeline/workflow-controller.yaml；
+# 用法 / 与 reviewer 的关系见 docs/designs/stage-gating.md。

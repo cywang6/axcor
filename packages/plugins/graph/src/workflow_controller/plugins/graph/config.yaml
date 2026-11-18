@@ -1,0 +1,4 @@
+name: graph
+version: "0.1.0"
+# 默认开启：启动即注册 graph-yaml@1 驱动工厂与 RunDagPanel 面板声明。
+enabled: true

@@ -130,4 +130,3 @@ rm -rf sample-project/.workflow-controller sample-project/.claude sample-project
 
 - **换成你自己的任务**：改 `workflow-controller.yaml` 的 `project_dir` + `starting_prompt`
 - **算子生成场景**：装 cannbot plugin，参考仓库根 [`examples/workflow-controller.yaml`](../workflow-controller.yaml)
-- **架构细节**：[`docs/ARCHITECTURE.md`](../../docs/ARCHITECTURE.md)

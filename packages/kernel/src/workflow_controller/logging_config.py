@@ -49,7 +49,7 @@ def configure_logging(project_dir: Path, level: str = "INFO") -> Path:
     )
     handler.setFormatter(
         logging.Formatter(
-            "%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+            "%(asctime)s %(levelname)-7s %(name)s:%(lineno)d: %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         ),
     )

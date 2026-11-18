@@ -49,9 +49,7 @@ plugin 的工程，runtime 注释了 SDK / CLI / GLM 三种接法）。
 |---|---|---|
 | `claude_sdk` | 原生 Anthropic（env `ANTHROPIC_API_KEY` / OAuth） | 入门、阶段门禁、stop hook（in-process SDK） |
 | `claude_cli` | 第三方 / GLM 端点（env `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_MODEL`） | AUQ 门禁（CLI 有 AskUserQuestion 工具）、GLM |
-| `opencode` | opencode CLI + provider（全局 `~/.config/opencode/opencode.json`，如 zai-anthropic + glm-5.2；见 [`docs/designs/opencode-support.md`](../docs/designs/opencode-support.md)） | opencode runtime、subagent、GLM |
+| `opencode` | opencode CLI + provider（全局 `~/.config/opencode/opencode.json`，如 zai-anthropic + glm-5.2） | opencode runtime、subagent、GLM |
 | `codex_cli` | Codex CLI（不低于 `0.166.0`）+ Web 设置中的 Codex provider（base URL / API key / model 必填） | Codex runtime、子代理实时进度 |
 
-详见各 example README + `docs/`（[ARCHITECTURE](../docs/ARCHITECTURE.md) /
-[opencode-support](../docs/designs/opencode-support.md) / [stage-gating-design](../docs/designs/stage-gating.md) /
-[reviewer-design](../docs/designs/reviewer.md)）。
+详见各 example README。

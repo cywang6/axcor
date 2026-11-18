@@ -12,7 +12,7 @@ primary agent 起一个 reader subagent 读取 articles/ 下的体育新闻文�
 
 ## 前置
 
-- **opencode CLI + provider**（配方见 `docs/designs/opencode-support.md`）。
+- **opencode CLI + provider**（全局 `~/.config/opencode/opencode.json`，如 zai-anthropic + glm-5.2）。
 - **workflow-controller web**：`.venv/bin/workflow-controller web`。
 
 ## 跑
@@ -43,6 +43,6 @@ primary agent 起一个 reader subagent 读取 articles/ 下的体育新闻文�
 | `handoff-prompt.md` | 极简 handoff agent prompt 模板（检查产物判断阶段，两个 Write 就结束） |
 | `continuation-prompt.md` | 接续 worker prompt 模板（读交接文档 → 按「下一步」执行） |
 
-> `handoff_prompt_path` 和 `continuation_prompt_path` 是 per-project 配置（写在项目 `workflow-controller.yaml` 里），不配则用 breather 内置默认模板。详见 `docs/designs/breather-plugin.md` §8。
+> `handoff_prompt_path` 和 `continuation_prompt_path` 是 per-project 配置（写在项目 `workflow-controller.yaml` 里），不配则用 breather 内置默认模板。
 
 本示例仅支持 OpenCode；`runtime: opencode`、`task` 工具指令和 `AGENTS.md` 均按 OpenCode 工作流编写。
