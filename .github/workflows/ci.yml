@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装锁定依赖
+        run: uv sync --locked
+
+      - name: 代码风格与静态检查
+        run: |
+          uv run ruff format --check .
+          uv run ruff check .
+          uv run lint-imports --no-cache
+          uv run codespell $(git ls-files '*.md')
+
+      - name: 测试与架构门禁
+        run: uv run pytest -q
+
+      - name: 各发行包独立构建
+        run: |
+          uv build --package workflow-controller-kernel
+          uv build --package workflow-controller-plugin-fake-driver
+          uv build --package workflow-controller-hookserver
+
+  npm:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/opencode-file-provenance
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 安装锁定依赖
+        run: npm ci
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      # npm test 依赖 file_provenance 插件包（Python 侧），随其成包后启用
