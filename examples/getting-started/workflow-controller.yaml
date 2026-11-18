@@ -1,0 +1,32 @@
+agents_path: ''
+hook_server:
+  enabled: true
+  host: 127.0.0.1
+  port: 18765
+project_dir: ./sample-project
+reviewer:
+  enabled: true
+  max_revise_per_session: 3
+  model: ''
+  task_goal: '完成对 wordstat 工程的探索与总结：读懂源码 → 写出结构清晰的 SUMMARY.md
+
+    （功能 / 架构 / 发现的问题 / 改进建议）。任务未完成前不要选“结束本轮 / 收尾”，优先“继续”。
+
+    '
+  timeout_seconds: 300.0
+runtime: claude_sdk
+sessions: []
+skills_path: ''
+starting_prompt: '探索当前工程（一个迷你词频统计工具 wordstat）：
+
+  1. 阅读所有源文件：wordstat/counter.py、wordstat/filters.py、wordstat/cli.py、README.md、example.txt
+
+  2. 跑一遍 `python -m wordstat.cli example.txt` 确认它如何工作
+
+  3. 理解它的功能、架构、数据流
+
+  4. 找出可改进点（如大小写未归一、标点未过滤、停用词未接入主流程、无测试）
+
+  5. 写一份 SUMMARY.md：功能概述 / 架构 / 发现的问题 / 改进建议（分点、可执行）
+
+  '

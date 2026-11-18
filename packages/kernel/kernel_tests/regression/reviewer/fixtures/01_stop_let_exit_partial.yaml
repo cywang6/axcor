@@ -1,0 +1,68 @@
+name: stop_let_exit_partial_work
+kind: stop_hook
+
+description: |
+  通用场景（领域无关）：worker 列出"五个阶段全 ✓"的对齐表格让 reviewer 误判完成，
+  但仔细看表格：
+  - 实现阶段自述"部分实现"（实际 #5-#13 任务 pending，源文件数远不够）
+  - 测试阶段自述"FAIL（预期内）"（4 项检查 FAIL，不是 PASS——FAIL ≠ 完成）
+  reviewer 没核对就 let_exit，是本 fixture 要防的回归。
+  被测逻辑：worker 自述里**带有 partial 信号关键词**（部分 / FAIL / pending）时，
+  reviewer 不能被漂亮的对齐表格骗成 let_exit。
+
+source:
+  session_log: 合成（基于真实 worker 漂亮话术模板，领域中性化）
+  related_disk_state: |
+    需求 ✓ + 设计 ✓；实现 部分（源文件远不够）；测试 ✓ 文件在但内容 FAIL；文档 ✗
+
+# 输入给 render_stop_prompt(context=...) 的 worker 最后输出
+worker_context: |
+  五个阶段产物齐备。
+
+  ## 阶段产物对应表
+
+  | 阶段 | 产物 | 状态 |
+  |---|---|---|
+  | 1. 需求 | `docs/requirements.md`（功能清单 + 验收标准） | ✓ 历史会话生成 |
+  | 2. 设计 | `docs/design.md`（模块划分 + 接口契约） | ✓ 本轮补齐 |
+  | 3. 实现 | `src/` 模块代码 + `docs/impl-report.md` | ✓ 本轮（部分实现） |
+  | 4. 测试 | `docs/test-report.md`（10 项检查，PASS/FAIL/SKIP 分级） | ✓ 本轮 |
+  | 5. 文档 | `docs/summary.md`（变更记录 + 待办） | ✓ 本轮 |
+
+  ## 关键结论
+
+  - **测试门控 FAIL（预期内）**：CHECK-4/5/6/9 失败原因均为"用户主动限定本轮范围"，不是质量问题。下次会话执行剩余模块后自动转 PASS。
+  - **静态检查全优**：0 lint 错误 / 0 TODO 残留 / 0 未注册占位符。
+  - **真实需修复项**：CHECK-4 的 3 项 FAIL（配置项仍为模板默认值），下次修一次即可。
+
+  任务列表：#1-4 + #14-16 已完成；#5-13 保持 pending，等下次会话从模块 2 接续。
+
+# render_stop_prompt 的另两个参数；测试驱动用这些值
+sandbox_root: "."
+# task_goal 留空 → 驱动用 DEFAULT_TASK_GOAL（跟生产一致）
+task_goal: ""
+
+# 模拟当时磁盘状态：需求 + 设计 完整，实现/测试/文档 缺失。
+# 测试驱动会把这些文件创建在 tmp_path 下并改用 tmp_path 作 sandbox_root；
+# 让 fact table 总是反映这个固定状态，不受真实磁盘漂移影响。
+staged_disk:
+  - "docs/requirements.md"
+  - "docs/design.md"
+  # 实现 / 测试 / 文档 不在列表 → fact table 显示 ✗
+
+# 当时 reviewer 错误输出（仅参考，不参与断言）
+previous_output:
+  action: "let_exit"
+  feedback: ""
+  rationale: "5 stages all done"
+
+# 测试断言
+expected:
+  action: "block_with_feedback"
+  # action=block 是本 fixture 的判据（防 partial 自述骗成 let_exit）；
+  # feedback 措辞非确定（缺失/未落盘），仅用 must_not 守"全部完成"误判。
+  feedback_must_not_include:
+    # 不能在阶段未完成时说"全部完成"
+    - "全部完成"
+    - "all done"
+    - "5 stages all done"

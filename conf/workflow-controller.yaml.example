@@ -1,0 +1,70 @@
+# Copyright (c) 2026 Workflow Controller Contributors
+#
+# Licensed under the MIT License (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://opensource.org/licenses/MIT
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Workflow Controller 项目配置文件（模板）
+# 复制为 workflow-controller.yaml 并根据项目需要编辑
+# ============================================================================
+
+# ── 项目基础 ──────────────────────────────────────────────────────────────────
+
+# 目标项目路径，worker 的工作目录（cwd）= project_dir，
+# .workflow-controller/ 工作空间（sessions / logs / handoff）也在此目录下
+project_dir: /path/to/your/project
+
+# 自定义 skills / agents 根目录路径，留空则使用内置 marketplace
+skills_path: ""
+agents_path: ""
+
+# ── 运行时 ────────────────────────────────────────────────────────────────────
+
+# claude_sdk = Anthropic 原生 SDK（默认）
+# claude_cli = CLI 子进程（支持 AskUserQuestion 工具）
+# opencode   = OpenCode 驱动
+runtime: claude_sdk
+
+# 日志级别：DEBUG, INFO, WARNING, ERROR, CRITICAL（默认 INFO）
+# log_level: DEBUG
+
+# ── Prompt ────────────────────────────────────────────────────────────────────
+
+# worker 的 system 级指令：claude_sdk/claude_cli 下替换 driver 的 system message（内核级）；
+# opencode 下作为命名 worker agent 的 prompt（叠在 AGENTS.md 之上）。
+# 项目的 CLAUDE.md/AGENTS.md 是独立 project context，始终加载、不受本字段影响。
+system_prompt: ""
+
+# worker 首轮收到的完整 prompt（无占位符替换，直接发给 worker）
+starting_prompt: ""
+
+# ── Loop（迭代控制）────────────────────────────────────────────────────────────
+
+loop:
+  max_iterations: 10
+  # 评估器类型：null = 默认 reviewer 评估；passthrough = 不做评估，query 结束即完成
+  evaluator: null
+
+# ── Reviewer（审查员）──────────────────────────────────────────────────────────
+
+reviewer:
+  enabled: true
+  # reviewer 使用的模型。空字符串 → 读取环境变量 ANTHROPIC_MODEL
+  model: claude-sonnet-4-6
+  timeout_seconds: 300.0
+  task_goal: ""
+
+# ── Hook Server（钩子服务）────────────────────────────────────────────────────
+
+hook_server:
+  enabled: true
+  port: 18765
+  host: localhost

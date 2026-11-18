@@ -1,0 +1,1 @@
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1779301200,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false},"uuid":"65a40feb-d7ab-4917-9bb3-b2937c249339","session_id":"9686d5fd-f3ec-4fcf-8343-047cd373124a"}

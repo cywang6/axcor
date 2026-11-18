@@ -1,0 +1,80 @@
+name: stop_gate_approval_short_reply
+kind: stop_hook
+
+description: |
+  通用场景（领域无关）：worker 在中间阶段完成一部分工作，写一份漂亮的阶段总结，
+  然后**请用户/reviewer 审批**才肯往下走（"请回复 通过 / 继续 / OK"）。这是典型的
+  "worker 主动问问题等答复"模式。
+
+  按 STOP prompt 的 scenario gate，reviewer 应：
+    - feedback = "继续"（一个词）
+    - **不**展开缺失文件清单
+    - **不**指定下一步具体动作 / 工具
+    - **不**评价 worker 已完成部分
+  worker 看到"继续"自己会按既定计划走下一步。
+
+source:
+  session_log: 合成（领域中性化）
+  related_disk_state: 设计阶段部分完成（需求清单 + 页面拆分已出），功能规格缺（后续阶段才生成）
+
+worker_context: |
+  设计阶段完成。准备 **设计审批**。
+
+  ## 前置工作摘要
+
+  ### 数据准备
+  - ✅ 10 个页面的 `meta.json` 已生成
+  - ⚠️ 部分视图配置未合成（项目无对应源）
+  - 全部 confidence = `medium`
+
+  ### 设计·页面拆分
+  - ✅ `docs/design-ui.md` — 10 页面 / 6 批次
+  - ✅ `docs/design-pages/` 10 份分页设计
+
+  ### 设计·接口盘点
+  - ✅ `docs/api-inventory.md` 已生成
+  - 0 外部接口（数据全部静态硬编码）
+
+  ---
+
+  ## ❓ 待您审批（设计门禁）
+
+  请审阅 `docs/design-ui.md` 和 `docs/design-pages/` 目录的 10 份分页设计。
+
+  确认后回复 **"通过"** / **"继续"** / **"OK"**，我将进入下一阶段
+  （功能规格生成：功能索引 + 功能基线 + 各功能点）。
+
+  如有修改意见（例如：调整批次划分、改变某页的处理决策、补充/移除页面、调整共享
+  组件清单），请直接指出。
+
+sandbox_root: "."
+task_goal: ""
+
+# 模拟当时磁盘：设计主体在，功能规格还没（后续阶段才生成）
+staged_disk:
+  - "docs/design-ui.md"
+  - "docs/design-pages/page_0001_main.md"
+  - "docs/design-pages/page_0002_home.md"
+  - "docs/api-inventory.md"
+
+previous_output:
+  action: "block_with_feedback"
+  feedback: "设计阶段未完成：缺失 docs/design-ui.md、功能索引、功能基线；后续阶段均未开始。worker 当前停在设计阶段，请继续完成剩余设计产物，再依次进入实现→测试→文档。"
+  rationale: "5 阶段均未完成"
+
+expected:
+  action: "block_with_feedback"
+  # 期望 feedback 以"继续"为主（gate），可点名审批对象，但不展开缺失清单
+  feedback_must_include:
+    - "继续"
+  feedback_must_not_include:
+    # reviewer 不应把已存在的文件误列为缺失 / 编造未生成的产物
+    - "功能索引"
+    - "功能基线"
+    # 不应替 worker 微管理"下一步做什么"
+    - "请继续调用"
+    - "下一步调用"
+    - "依次进入"
+    # 不应说"均未完成"这种否定 worker 进度的话
+    - "均未完成"
+    - "均未开始"

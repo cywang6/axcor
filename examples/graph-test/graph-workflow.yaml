@@ -1,0 +1,224 @@
+workflow: graph-demo
+description: Graph 引擎演示 —— 并行 DAG（step-b/step-c、step-d/step-e）+ 重试 + 回滚 + 子图 + run_on_failure
+max_parallel: 2
+rollback_budget: 2
+work_dir: .
+agents_dir: ./agents
+nodes:
+  - id: init
+    task_type: bash
+    command: rm -rf output reports && mkdir -p output reports && echo "init-ok" | tee output/init.txt
+    acceptance:
+      enabled: true
+      type: script
+      script: test -f output/init.txt
+    depends_on: []
+
+  - id: step-a
+    task_type: agent
+    executor: simple-worker
+    task_description: "先输出「倒计时5秒开始」，然后等待 5 秒（用 sleep 5），再创建 output/step-a.txt 并写入 step-a-done。"
+    acceptance:
+      enabled: true
+      type: script
+      script: test -f output/step-a.txt && grep -q "step-a-done" output/step-a.txt
+    depends_on: [init]
+
+  # ── 并行分支一：step-b / step-c 并行 ──
+  - id: step-b
+    task_type: bash
+    command: echo "step-b-done" | tee output/step-b.txt
+    acceptance:
+      enabled: true
+      type: script
+      script: test -f output/step-b.txt
+    depends_on: [step-a]
+
+  - id: step-c
+    task_type: agent
+    executor: simple-worker
+    task_description: "先输出「倒计时5秒开始」，然后等待 5 秒（用 sleep 5），再创建 output/step-c.txt 并写入 step-c-done。"
+    acceptance:
+      enabled: true
+      type: script
+      script: test -f output/step-c.txt && grep -q "step-c-done" output/step-c.txt
+    depends_on: [step-a]
+
+  # ── 并行分支二：step-d / step-e 并行 ──
+  - id: step-d
+    task_type: agent
+    executor: simple-worker
+    task_description: "先输出「倒计时5秒开始」，然后等待 5 秒（用 sleep 5），再创建 output/step-d.txt 并写入 step-d-done。"
+    acceptance:
+      enabled: true
+      type: script
+      script: test -f output/step-d.txt && grep -q "step-d-done" output/step-d.txt
+    depends_on: [step-b, step-c]
+
+  - id: step-e
+    task_type: agent
+    executor: simple-worker
+    task_description: "先输出「倒计时5秒开始」，然后等待 5 秒（用 sleep 5），再创建 output/step-e.txt 并写入 step-e-done。"
+    acceptance:
+      enabled: true
+      type: script
+      script: test -f output/step-e.txt && grep -q "step-e-done" output/step-e.txt
+    depends_on: [step-b, step-c]
+
+  # ── 重试：flaky-step 前 2 次验收失败，第 3 次成功（max_retries 自动重试）──
+  - id: flaky-step
+    task_type: bash
+    # run_count 计数：前 2 次写 wrong，第 3 次起写 flaky-done
+    command: |
+      CNT=$(cat output/run_count 2>/dev/null || echo 0)
+      CNT=$((CNT+1))
+      echo $CNT > output/run_count
+      echo "flaky-step attempt #$CNT"
+      if [ "$CNT" -lt 3 ]; then
+        echo "wrong-content" > output/flaky.txt
+      else
+        echo "flaky-done" > output/flaky.txt
+      fi
+    acceptance:
+      enabled: true
+      type: script
+      script: grep -q "flaky-done" output/flaky.txt
+      max_retries: 3
+      on_exhaust: stop
+    depends_on: [step-d, step-e]
+
+  # ── 子图：gen-sub 生成子工作流并递归编排（含子图回滚：sub-flaky 失败回滚到 sub-init）──
+  - id: gen-sub
+    task_type: generator
+    generator_type: bash
+    # heredoc 产出子工作流 yaml：块标量 | 剥离公共缩进，运行时 EOF 位于行首，勿改动缩进
+    command: |
+      cat > output/sub-workflow.yaml <<'EOF'
+      workflow: sub-demo
+      max_parallel: 2
+      work_dir: .
+      agents_dir: ./agents
+      nodes:
+        - id: sub-init
+          task_type: bash
+          command: echo "sub-init-ok" | tee output/sub-init.txt
+          acceptance:
+            enabled: true
+            type: script
+            script: test -s output/sub-init.txt
+          depends_on: []
+        - id: sub-flaky
+          task_type: bash
+          # 子图回滚演示：前 1 次验收失败，耗尽后回滚到 sub-init 重跑，第 2 次通过
+          command: |
+            CNT=$(cat output/sub_run_count 2>/dev/null || echo 0)
+            CNT=$((CNT+1))
+            echo $CNT > output/sub_run_count
+            echo "sub-flaky attempt #$CNT"
+            if [ "$CNT" -lt 2 ]; then
+              echo "wrong-content" > output/sub-flaky.txt
+            else
+              echo "sub-flaky-done" > output/sub-flaky.txt
+            fi
+          acceptance:
+            enabled: true
+            type: script
+            script: grep -q "sub-flaky-done" output/sub-flaky.txt
+            max_retries: 0
+            on_exhaust: rollback
+            rollback_to: sub-init
+          depends_on: [sub-init]
+        - id: sub-agent-a
+          task_type: agent
+          executor: simple-worker
+          task_description: "读取 output/sub-flaky.txt（内容为 sub-flaky-done），再创建 output/sub-a.txt 并写入 sub-a-done。完成后回复 DONE。"
+          task_goal: "产出 output/sub-a.txt，内容为 sub-a-done。完成后返回 DONE。"
+          acceptance:
+            enabled: true
+            type: script
+            script: grep -q sub-a-done output/sub-a.txt
+          depends_on: [sub-flaky]
+        - id: sub-agent-b
+          task_type: agent
+          executor: simple-worker
+          task_description: "读取 output/sub-a.txt，创建 output/sub-b.txt 并写入 sub-b-done。完成后回复 DONE。"
+          task_goal: "依赖上游 sub-a.txt，产出 output/sub-b.txt，内容为 sub-b-done。完成后返回 DONE。"
+          acceptance:
+            enabled: true
+            type: script
+            script: grep -q sub-b-done output/sub-b.txt
+          depends_on: [sub-agent-a]
+        - id: sub-verify
+          task_type: bash
+          command: |
+            echo "sub-verify: checking all artifacts"
+            cat output/sub-a.txt output/sub-b.txt > output/sub-merged.txt
+          acceptance:
+            enabled: true
+            type: script
+            script: |
+              test -s output/sub-merged.txt &&
+                grep -q sub-a-done output/sub-merged.txt &&
+                grep -q sub-b-done output/sub-merged.txt
+          depends_on: [sub-agent-b]
+      EOF
+    subgraph:
+      output: output/sub-workflow.yaml
+    acceptance:
+      enabled: true
+      type: script
+      script: test -s output/sub-workflow.yaml
+    depends_on: [flaky-step]
+
+  # ── 回滚：bad-node 前 2 次验收失败 → 回滚到 step-a，第 3 次（回滚 #3）成功 ──
+  - id: bad-node
+    task_type: bash
+    # run_count 累加：< 5 写 wrong，>= 5 写 done（2 次回滚后第 3 代成功）
+    command: |
+      CNT=$(cat output/bad_run_count 2>/dev/null || echo 0)
+      CNT=$((CNT+1))
+      echo $CNT > output/bad_run_count
+      echo "bad-node attempt #$CNT"
+      if [ "$CNT" -lt 5 ]; then
+        echo "wrong" > output/bad.txt
+      else
+        echo "done" > output/bad.txt
+      fi
+    acceptance:
+      enabled: true
+      type: script
+      script: grep -q "done" output/bad.txt
+      max_retries: 1
+      on_exhaust: rollback
+      rollback_to: step-a
+    report:
+      enabled: true
+      save_to: "reports/bad-node-attempt-{{attempt}}.md"
+    depends_on: [gen-sub]
+
+  # ── 肯定会失败的节点：bad-node 成功后跑这里，永远失败（on_exhaust: stop 不回滚）──
+  - id: always-fail
+    task_type: bash
+    command: echo "this node always fails" && echo "bad" > output/always-fail.txt
+    acceptance:
+      enabled: true
+      type: script
+      script: grep -q "never" output/always-fail.txt
+      max_retries: 0
+      on_exhaust: stop
+    depends_on: [bad-node]
+
+  # ── 收尾报告：run_on_failure，依赖 always-fail，always-fail 失败后仍执行 ──
+  - id: final-report
+    task_type: bash
+    run_on_failure: true
+    command: |
+      echo "=== Final Report ===" > output/final-report.txt
+      echo "bad-node: $(cat output/bad.txt 2>/dev/null || echo MISSING)" >> output/final-report.txt
+      echo "always-fail: $(cat output/always-fail.txt 2>/dev/null || echo MISSING)" >> output/final-report.txt
+      echo "ALL-DONE" >> output/final-report.txt
+    acceptance:
+      enabled: true
+      type: script
+      script: grep -q "ALL-DONE" output/final-report.txt
+    depends_on: [always-fail]

@@ -1,0 +1,1 @@
+主代理只负责派发和等待，不要运行 `prepare.py`、读取 `inputs/` 或自己写产物。首次运行在同一条回复中并行派发 `reader`、`auditor`、`reporter` 三名子代理。收到 Workflow Controller 的交接清单后，并行重新派发清单中的所有同类型子代理；每次 Agent 工具的 prompt 使用该 entry 的 `dispatch_prompt` 原文，让新子代理先读自己的交接文档再从未完成步骤继续。

@@ -1,0 +1,6 @@
+# demo 运行产物（Workflow Controller 起 session 时生成）
+.demo-web.log
+.demo-sse.log
+sample-project/.workflow-controller/
+sample-project/.claude/
+sample-project/SUMMARY.md

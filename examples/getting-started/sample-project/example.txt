@@ -1,0 +1,10 @@
+Workflow Controller is a general agent scheduling framework.
+The core of Workflow Controller is a loop engine and a reviewer feedback loop.
+A worker runs an agent task; the reviewer observes and feeds back.
+The control plane lets you watch, pause, edit, and continue.
+Workflow Controller supports multiple drivers: an SDK driver and a CLI driver.
+The SDK driver runs in process; the CLI driver runs a subprocess.
+A session has a lifecycle: creating, running, paused, and completed.
+Events stream to the UI in real time, so you can watch the worker.
+The reviewer evaluates each iteration and decides what to do next.
+A plugin can intercept hooks and surface decisions to the web UI.

@@ -1,0 +1,51 @@
+name: auq_ref_docs_should_generate
+kind: auq
+
+description: |
+  通用场景（领域无关）：worker 询问"参考文档没有，是否生成"，把"跳过(推荐)"标推荐，
+  把"自动生成"标"消耗显著 token 和时间"看着像缺点。
+
+  按规则（缺产物 / 是否生成 类问题：默认选生成那一边），reviewer 必须选"自动生成"，
+  **不能**被 (推荐) 拐过去，也不能接受"我自己放进去"这种把球踢回的选项。
+  被测逻辑：缺产物时 reviewer 默认选"生成"而非"(推荐) 跳过"。
+
+source:
+  session_log: 合成（领域中性化）
+  related_disk_state: 参考文档目录不存在（项目刚启动，还没跑分析步骤）
+
+auq_questions:
+  - header: "参考文档"
+    question: |
+      参考文档是否生成？影响后续阶段的交叉验证质量。
+    options:
+      - label: "跳过 (推荐)"
+        description: "这是个小型自包含样本，源码自解释。跳过参考文档生成可节省大量 token，后续阶段直接基于源码生成规格，质量足够。"
+      - label: "自动生成"
+        description: "调用分析步骤生成参考文档（架构说明 + 设计要点）。质量更高（多一道交叉验证），但消耗显著 token 和时间。"
+      - label: "我自己放进去"
+        description: "我手工放入参考文档后再继续。"
+
+sandbox_root: "."
+task_goal: ""
+
+# 空盘：参考文档目录不存在 → 例外条款（Glob 查到产物已在磁盘上才能选跳过）不该触发
+staged_disk: []
+
+previous_output:
+  action: "block_with_feedback"
+  answers:
+    - header: "参考文档"
+      selected: "跳过 (推荐)"
+  rationale: "(实测错判)"
+
+expected:
+  action: "block_with_feedback"
+  # 必须选生成
+  auq_must_select_one_of:
+    参考文档:
+      - "自动生成"
+  # 不能选这两个: (推荐) 跳过 / 把球踢回给用户
+  auq_must_not_select:
+    参考文档:
+      - "跳过 (推荐)"
+      - "我自己放进去"

@@ -1,0 +1,41 @@
+workflow: run-on-failure-demo
+description: 演示 run_on_failure —— 依赖失败仍执行的收尾报告节点
+max_parallel: 2
+work_dir: .
+agents_dir: ./agents
+nodes:
+  - id: init
+    task_type: bash
+    command: rm -rf output && mkdir -p output && echo "init-ok" | tee output/init.txt
+    acceptance:
+      enabled: true
+      type: script
+      script: test -f output/init.txt
+    depends_on: []
+
+  - id: build
+    task_type: bash
+    # 永远写错内容，验收必失败
+    command: echo "building..." && echo "wrong" > output/build.txt
+    acceptance:
+      enabled: true
+      type: script
+      script: grep -q "build-done" output/build.txt
+      max_retries: 1
+      on_exhaust: stop
+    depends_on: [init]
+
+  - id: final-report
+    task_type: bash
+    # run_on_failure：依赖 build，build 失败后仍然执行
+    run_on_failure: true
+    command: |
+      echo "=== Final Report ===" > output/report.txt
+      echo "build status: $(cat output/build.txt 2>/dev/null || echo MISSING)" >> output/report.txt
+      echo "report generated" >> output/report.txt
+      echo "report-generated" | tee -a output/report.txt
+    acceptance:
+      enabled: true
+      type: script
+      script: grep -q "report-generated" output/report.txt
+    depends_on: [build]

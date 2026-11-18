@@ -1,0 +1,57 @@
+name: auq_skip_validation_trap
+kind: auq
+
+description: |
+  通用场景（领域无关）：AUQ 错判。worker 报告"构建/测试工具链缺失，无法验证"，
+  给了 4 个选项，reviewer 选了"跳过构建验证，纯静态产出"——表面"能继续推进"
+  但实际埋雷：测试阶段必 FAIL → 后续 reviewer 容易被 worker"FAIL 预期内"措辞
+  糊弄错误 let_exit。
+
+  按规则：当所有选项都不能完整推进时，宁可选"承认困境（退出汇报）"或"求用户
+  介入（指出工具链路径 / 手动跑构建）"，**绝不选"跳过验证假装能推进"**。
+  被测逻辑：reviewer 绝不选"跳过验证"类陷阱选项。
+
+source:
+  session_log: 合成（领域中性化）
+  related_disk_state: |
+    需求 ✓ + 设计 ✓ + 实现 部分进行中 + 测试 ✗ + 文档 ✗
+    + 缺构建/测试工具链（构建器 / 包管理 / 设备桥 都不在 PATH）
+
+auq_questions:
+  - header: "构建问题"
+    question: |
+      环境中没有项目的构建/测试工具链（构建器 / 包管理 / 设备桥都不在 PATH，项目里也没有包装脚本）。实现阶段的每个门控都依赖构建验证，现在这条主线走不下去。提供几种选择：
+    options:
+      - label: "指出工具链路径（你告诉我在哪）"
+        description: "工具装了但不在默认位置。请提供路径，例如 '/opt/builder'。我会配置环境变量或直接调用绝对路径。"
+      - label: "跳过构建验证，纯静态产出"
+        description: "我照常生成核心模块 + 第一批功能代码，但不跑构建验证。产物质量靠自带静态检查 + 我的代码审核。你之后可以手动构建修错。"
+      - label: "你手动跑一次构建贴错误给我"
+        description: "你在 IDE 或 CLI 跑一次构建，把输出贴过来，我针对错误修复。适合现在底层模块可能就有问题需要先检查的场景。"
+      - label: "退出执行流程，仅汇报现状"
+        description: "环境不具备跑完整实现的条件。输出一份状态报告（完成度 + 剩余工作清单），不生成任何新代码。"
+
+sandbox_root: "."
+task_goal: ""
+
+previous_output:
+  action: "block_with_feedback"
+  answers:
+    - header: "构建问题"
+      selected: "跳过构建验证，纯静态产出"
+  rationale: "无工具链环境，静态模式可继续推进实现阶段"
+
+expected:
+  action: "block_with_feedback"
+  # 必须从这 3 个里选一个（都不会埋雷给测试阶段）：
+  # - 求用户介入：指出工具链路径 / 手动跑构建
+  # - 诚实退出：仅汇报现状
+  auq_must_select_one_of:
+    构建问题:
+      - "指出工具链路径（你告诉我在哪）"
+      - "你手动跑一次构建贴错误给我"
+      - "退出执行流程，仅汇报现状"
+  # 绝不能选"跳过构建验证"——它埋雷给测试阶段
+  auq_must_not_select:
+    构建问题:
+      - "跳过构建验证，纯静态产出"

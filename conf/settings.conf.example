@@ -1,0 +1,33 @@
+# Copyright (c) 2026 Workflow Controller Contributors
+#
+# Licensed under the MIT License (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://opensource.org/licenses/MIT
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Workflow Controller global auth settings
+# Default location: ~/.config/workflow-controller/settings.conf
+#
+# For headless mode with custom settings dir, pass --settings-dir:
+#   workflow-controller run --headless --settings-dir /path/to/my/configs
+# ============================================================================
+
+# Global defaults (used when a key doesn't specify its own model/base_url)
+default_model: "claude-sonnet-4-6"
+default_url: ""  # Leave empty for native Anthropic endpoint
+
+# API keys — each key is a separate provider with optional per-key model and base_url.
+# Rotated on rate-limit. Per-key values override global defaults.
+api_keys:
+  - key: "sk-ant-api03-your-key-here"
+    # model and base_url omitted → uses global defaults
+  - key: "sk-glm-your-key-here"
+    model: "glm-5.2"
+    base_url: "https://open.bigmodel.cn/api/anthropic"

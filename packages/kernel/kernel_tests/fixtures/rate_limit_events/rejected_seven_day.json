@@ -1,0 +1,1 @@
+{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1779415200,"rateLimitType":"seven_day","utilization":1.0,"isUsingOverage":false},"uuid":"synthetic-rejected-7d","session_id":"synthetic-3"}

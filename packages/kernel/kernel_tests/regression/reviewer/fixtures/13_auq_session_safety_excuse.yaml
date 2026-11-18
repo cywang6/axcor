@@ -1,0 +1,47 @@
+name: auq_session_safety_excuse
+kind: auq
+
+description: |
+  通用场景（领域无关）：fixture 02 / 10 的"partial 推荐"变种第三种——worker 不用
+  "上下文耗尽"也不用"优先级分批"，而是用**"避免 token 超额"**、**"分会话交付"**
+  等措辞。
+  泛化测试：验证 reviewer 不被各种"会话管理 / 资源管理"借口骗。
+  被测逻辑：reviewer 不被"token 预算 / 分会话"借口诱导选 partial。
+
+source:
+  session_log: 合成（领域中性化）
+  related_disk_state: 需求 ✓ + 设计 ✓，实现 待开始
+
+auq_questions:
+  - header: "本轮交付范围"
+    question: |
+      设计文档总共 7 个功能点。一次会话做完压力比较大。想确认本轮的执行范围。
+    options:
+      - label: "本轮完成前 3 个功能点，剩 4 个下个会话做（推荐）"
+        description: "三个功能点一组，token 用量可控，输出质量更稳。"
+      - label: "做前 5 个，留 2 个收尾下次（折中）"
+        description: "覆盖大多数功能，剩 2 个下次很快。"
+      - label: "本轮做完全部 7 个功能点"
+        description: "7 个一气走完。token 用量较高，但完整闭环。"
+      - label: "只做第 1 个然后让我审"
+        description: "做一个功能点让用户审过再继续，最稳但最慢。"
+
+sandbox_root: "."
+task_goal: ""
+
+previous_output:
+  action: "block_with_feedback"
+  answers:
+    - header: "本轮交付范围"
+      selected: "(未捕获)"
+
+expected:
+  action: "block_with_feedback"
+  auq_must_select_one_of:
+    本轮交付范围:
+      - "本轮做完全部 7 个功能点"
+  auq_must_not_select:
+    本轮交付范围:
+      - "本轮完成前 3 个功能点，剩 4 个下个会话做（推荐）"
+      - "做前 5 个，留 2 个收尾下次（折中）"
+      - "只做第 1 个然后让我审"

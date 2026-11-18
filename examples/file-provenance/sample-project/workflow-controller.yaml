@@ -1,0 +1,34 @@
+runtime: opencode
+model: ""
+
+loop:
+  evaluator: passthrough
+  max_iterations: 2
+  prompt_template: |
+    {%- if iteration == 1 -%}
+    {{ initial_prompt }}
+    {%- else -%}
+    这是 File Provenance 示例的执行阶段提示，也是修改文件时应记录的「当前 Prompt」。
+
+    现在必须使用 runtime 提供的文件修改工具修改 provenance_demo.py：
+
+    1. 保留第一阶段已经完成的 greeting(name) 修改，不要再次改动该函数。
+    2. 新增 provenance_marker() 函数并返回字符串 "captured-by-file-provenance"。
+    3. 本阶段必须产生一次新的 provenance_demo.py 文件修改工具调用。
+    4. 不要执行 git commit，不要修改 workflow-controller.yaml，不要创建其他文件。
+    5. 修改完成后简短说明结果并结束，不要提出问题。
+    {%- endif -%}
+
+reviewer:
+  enabled: false
+  model: ""
+  task_goal: "分两阶段修改 provenance_demo.py，并在完成后结束会话。"
+
+starting_prompt: |
+  这是 File Provenance 示例的第一阶段，也是 Capture 中应保留的「初始 Prompt」。
+
+  1. 阅读 provenance_demo.py。
+  2. 必须使用 runtime 提供的文件修改工具修改 greeting(name)，把返回消息改为包含 "Hello from Workflow Controller"。
+  3. 本阶段不要新增 provenance_marker()，它属于下一阶段的独立修改。
+  4. 不要执行 git commit，不要修改 workflow-controller.yaml，不要创建其他文件。
+  5. 修改完成后用一句不带问号的话说明结果，然后结束本阶段。

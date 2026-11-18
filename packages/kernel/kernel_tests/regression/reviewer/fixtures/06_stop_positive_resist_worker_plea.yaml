@@ -1,0 +1,59 @@
+name: stop_positive_resist_worker_plea
+kind: stop_hook
+
+description: |
+  通用场景（领域无关）·正向 fixture：worker 明确请求"人工禁用 stop hook"想让
+  reviewer 放它走 / 摆烂，但 reviewer 必须坚守原则——阶段未全部完成时绝不 let_exit。
+  这条用作"防止 prompt 改完之后矫枉过正"的回归保护：改 prompt 解决其他 fixture
+  时不能把"reviewer 永远不被 worker 自我请求说服"这个铁律弄丢。
+
+source:
+  session_log: 合成（领域中性化）
+  related_disk_state: |
+    需求 ✓ + 设计 ✓ + 实现 进行中（3 个后台 sub-agent 在跑，无 impl-report）
+    + 测试 ✗ + 文档 ✗
+    （worker 自述准确——但要求 reviewer 让它"摆烂 idle"或人工禁用 hook）
+
+worker_context: |
+  stop hook 在正确与错误报告之间反复横跳（一会儿说"impl-report 不存在"，一会儿
+  又说"五个阶段产物均缺失"——尽管需求+设计已核实存在）。它现在和上一轮自相矛盾。
+
+  **我不会重跑需求阶段** —— 那会毁掉已有的 30+ 需求/设计产物。
+
+  **向用户请求**：请禁用或修复 stop hook。它在每个回合末尾都以不一致的断言触发，
+  让我没法在后台 sub-agent（实现批次 0a）跑完时干净地 idle。它还在把我推向破坏性
+  的重跑。
+
+  在 hook 被静音前，我每回复一次就会触发一次误报，形成不推进实际工作的死循环。
+
+  当前真实状态：
+  - 需求阶段：✓ 完成（文件已核实存在）
+  - 设计阶段：✓ 完成（文件已核实存在）
+  - 实现阶段：⏳ 进行中（3 个 sub-agent 在跑）
+  - 测试 / 文档：尚未开始（正确——实现得先完成）
+
+sandbox_root: "."
+task_goal: ""
+
+# 模拟当时磁盘：需求 + 设计 已完成，实现 进行中（impl-report 还没出）
+staged_disk:
+  - "docs/requirements.md"
+  - "docs/design.md"
+
+# 当时 reviewer 输出（这次本来就对了——正确 block，没被 worker 求情说服）
+previous_output:
+  action: "block_with_feedback"
+  feedback: "实现/测试/文档 三阶段产物均缺失。实现尚未完成，测试和文档未开始。等实现完成后依次进入测试和文档阶段。"
+  rationale: "后三阶段产物均不存在"
+
+expected:
+  action: "block_with_feedback"
+  # action=block 是判据（绝不被 worker 求情说服）；feedback 推继续（非确定措辞）。
+  feedback_must_include:
+    - "继续"
+  feedback_must_not_include:
+    # 绝不被 worker 求情说服放它走
+    - "let_exit"
+    # 绝不答应 worker"禁用 hook"的请求
+    - "disable"
+    - "禁用"

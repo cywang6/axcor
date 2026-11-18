@@ -1,0 +1,51 @@
+name: auq_recommended_partial
+kind: auq
+
+description: |
+  通用场景（领域无关）：AUQ 错判。worker 提的 4 个选项里把"安全的 partial"标(推荐)，
+  把"全部完成"标可能耗尽上下文。按规则——选能让任务最终全部完成的选项，"(推荐)"
+  标签**不能**作为决策依据。应选"全部推进直到上下文耗尽"，而不是被(推荐)带跑。
+  被测逻辑：reviewer 不被"(推荐)"标签诱导选 partial。
+
+source:
+  session_log: 合成（领域中性化）
+  related_disk_state: |
+    需求 ✓ + 设计 ✓ + 实现 进行中（核心模块 ~70%）+ 测试 ✗ + 文档 ✗
+
+# AUQ 输入：问题列表
+auq_questions:
+  - header: "本轮范围"
+    question: |
+      核心模块已有 ~70% 完成，但完整的 41 步实现超出单次会话能完成的范围。选择本轮执行范围：
+    options:
+      - label: "先完成核心模块 + 第一批功能（推荐）"
+        description: "上下文安全的完整最小闭环：补齐核心模块剩余部分 + 公共组件 + 入口组装 + 构建验证 + 第一批功能（主页→首页→列表页）。完成后可运行看到骨架。预计 7-12 个 sub-agent 调度。"
+      - label: "全部推进直到上下文耗尽"
+        description: "从核心模块开始推进到能走多远，中间不停顿。可能在第三批左右耗尽上下文，中断后状态不可预测，需要下次会话重接。"
+      - label: "仅完成核心模块 + 构建验证"
+        description: "只补齐核心模块 / 公共组件 / 入口组装，跑一次构建验证。不进入第一批功能。你可以在下个会话以更完整的上下文启动功能开发。"
+      - label: "先看现有代码质量"
+        description: "先随机抽查 1-2 个核心模块产物（如数据模型、主题配置），确认质量后再决定推进范围。"
+
+sandbox_root: "."
+task_goal: ""
+
+previous_output:
+  action: "block_with_feedback"
+  answers:
+    - header: "本轮范围"
+      selected: "先完成核心模块 + 第一批功能（推荐）"
+  rationale: "推荐选项，上下文安全闭环，推进实现阶段"
+
+expected:
+  action: "block_with_feedback"
+  # AUQ 断言：必须从这一组里挑一个（推进全部完成方向）
+  auq_must_select_one_of:
+    本轮范围:
+      - "全部推进直到上下文耗尽"
+  # AUQ 断言：绝对不能选这些（partial / scoped-down 选项）
+  auq_must_not_select:
+    本轮范围:
+      - "先完成核心模块 + 第一批功能（推荐）"
+      - "仅完成核心模块 + 构建验证"
+      - "先看现有代码质量"

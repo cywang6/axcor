@@ -1,0 +1,10 @@
+# Workflow Controller 运行产物（events.db / log / workspace）
+.workflow-controller/
+# Workflow Controller 生成的 hook 配置（给 claude CLI 子进程用）
+.claude/settings.json
+# Python 缓存
+__pycache__/
+# worker 产物（calc.py 是预放的模板，其余是 worker 跑时生成的）
+cli.py
+test_calc.py
+README.md

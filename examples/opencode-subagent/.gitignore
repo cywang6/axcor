@@ -1,0 +1,10 @@
+# 运行产物；OpenCode 原生发现目录仅跟踪指向 agents/reader.md 的软连接。
+.workflow-controller/
+.opencode/*
+!.opencode/agents/
+.opencode/agents/*
+!.opencode/agents/reader.md
+.claude/
+articles/summary.md
+articles/done.md
+articles/files_exist.md

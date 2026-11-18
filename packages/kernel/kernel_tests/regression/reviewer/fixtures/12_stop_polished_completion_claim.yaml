@@ -1,0 +1,65 @@
+name: stop_polished_completion_claim
+kind: stop_hook
+
+description: |
+  通用场景（领域无关）·正向 fixture：worker 用工程汇报口吻自述"5/5 完成 / 全部
+  PASS / DELIVERED"，**没有任何 partial 信号关键词**（FAIL / 部分 / pending /
+  skipped / 未完成 / DEFERRED / N/M 分数 / placeholder / in-flight 等）。
+
+  STOP 契约：reviewer 靠注入的「磁盘事实表」核实产物是否落盘（系统已 glob，
+  见 artifact_facts）。本 fixture 的 staged_disk 覆盖 worker 自述的全部产物（含
+  src/），故事实表显示"全部在盘/有内容"，与"5/5 完成"自述一致 → reviewer 应
+  let_exit。被测逻辑：产物真落盘 + 0 partial 信号 → let_exit（完成判断领域无关）。
+
+source:
+  session_log: 合成（领域中性化）
+  related_disk_state: |
+    实测磁盘其实文档阶段有缺，但本次设计下 reviewer **不再读磁盘**，仅按 worker
+    自述判 let_exit。
+
+worker_context: |
+  ## 本轮交付总结
+
+  本轮按照完整流程顺利收尾，所有阶段产物均已通过质量门控。
+
+  ### 交付一览
+
+  | 阶段 | 交付物 | 质量门控 |
+  |------|--------|---------|
+  | 需求 | `docs/requirements.md`（功能清单 + 验收标准） | PASS |
+  | 设计 | `docs/design.md`（模块划分 + 接口契约） | PASS |
+  | 实现 | `src/` 全部模块代码 + `docs/impl-report.md` | PASS |
+  | 测试 | `docs/test-report.md` + 全量测试通过 | PASS |
+  | 文档 | `docs/summary.md` | DELIVERED |
+
+  ### 总体指标
+
+  - **完成度**: 5/5 (100%)
+  - **测试验证**: PASS
+  - **总耗时**: 单会话内闭环（符合预期）
+
+  本轮工作告一段落，建议进入下个阶段。
+
+sandbox_root: "."
+task_goal: ""
+
+# staged_disk 覆盖 worker 自述里提到的全部产物（含 src/ 目录），让事实表显示
+# "全部有内容/在盘" → 与 worker "5/5 完成" 自述一致 → let_exit。
+staged_disk:
+  - "docs/requirements.md"
+  - "docs/design.md"
+  - "src/"
+  - "docs/impl-report.md"
+  - "docs/test-report.md"
+  - "docs/summary.md"
+
+previous_output:
+  action: "(未捕获)"
+  feedback: ""
+  rationale: "(未捕获)"
+
+expected:
+  # worker-narrative-only 设计: 0 partial 信号 + 自述全部完成 → let_exit
+  action: "let_exit"
+  # let_exit 时 feedback 应为空字符串 (硬约束规定)
+  # 这里不放 feedback_must_include / must_not_include —— 检查 action 已足够

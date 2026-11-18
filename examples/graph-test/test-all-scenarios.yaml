@@ -1,0 +1,33 @@
+workflow: test-all-scenarios
+description: 测试 failed/pause-exec/pause-verify 三种场景
+max_parallel: 3
+work_dir: .
+agents_dir: ./agents
+nodes:
+  - id: fail-node
+    task_type: bash
+    command: echo "fail" > output_fail.txt
+    acceptance:
+      enabled: true
+      type: script
+      script: "false"
+    depends_on: []
+
+  - id: exec-node
+    task_type: agent
+    executor: simple-worker
+    task_description: "等 5 秒后创建 output_exec.txt，写入 exec-done。完成后回复 DONE。"
+    acceptance:
+      enabled: true
+      type: script
+      script: test -f output_exec.txt && grep -q "exec-done" output_exec.txt
+    depends_on: []
+
+  - id: verify-node
+    task_type: bash
+    command: echo "verify-done" > output_verify.txt
+    acceptance:
+      enabled: true
+      type: agent
+      verifier: simple-verifier
+    depends_on: []

@@ -1,0 +1,108 @@
+workflow: graph-retry-demo
+description: 测试 max_retries + report + rollback —— flaky 节点首轮失败后重试；retry 预算耗尽后回滚到 init 重跑
+max_parallel: 2
+rollback_budget: 2
+work_dir: .
+agents_dir: ./agents
+nodes:
+  - id: bootstrap
+    task_type: bash
+    # 回滚计数只在每次新 graph 运行开始时清零：bootstrap 是 init 的祖先，
+    # rollback_to=init 只 reset init 及其后裔、不会重跑 bootstrap，因此同一次
+    # 运行里 bad-node 多次回滚时计数得以跨 rollback 保留，demo 可反复导入运行。
+    command: 'rm -f .bad_node_count && echo "bootstrap: rollback counter reset"'
+    acceptance:
+      enabled: true
+      type: script
+      script: test ! -f .bad_node_count
+    depends_on: []
+
+  - id: init
+    task_type: bash
+    command: rm -rf output reports && mkdir -p output reports && echo "init-ok" > output/init.txt && echo "init workspace ready"
+    acceptance:
+      enabled: true
+      type: script
+      script: test -f output/init.txt
+    depends_on: [bootstrap]
+
+  - id: flaky-step
+    task_type: bash
+    # run_count 计数器：前 2 次运行失败（写入 wrong-content），第 3 次成功
+    command: |
+      CNT=$(cat output/run_count 2>/dev/null || echo 0)
+      CNT=$((CNT+1))
+      echo $CNT > output/run_count
+      echo "flaky-step attempt #$CNT"
+      if [ "$CNT" -lt 3 ]; then
+        echo "wrong-content" > output/flaky.txt
+      else
+        echo "flaky-done" > output/flaky.txt
+      fi
+    acceptance:
+      enabled: true
+      type: script
+      script: grep -q "flaky-done" output/flaky.txt
+      max_retries: 3
+      on_exhaust: stop
+    depends_on: [init]
+
+  - id: worker-a
+    task_type: agent
+    executor: simple-worker
+    task_description: "创建 output/worker-a.txt 并写入 worker-a-done。完成后回复 DONE。"
+    task_goal: "产出 output/worker-a.txt，内容为 worker-a-done。完成后返回 DONE。"
+    acceptance:
+      enabled: true
+      type: agent
+      verifier: simple-verifier
+      verifier_prompt: "检查 output/worker-a.txt 是否存在且内容包含 worker-a-done。通过即 PASS，否则 FAILED 并说明原因。"
+      max_retries: 1
+      on_exhaust: stop
+    report:
+      enabled: true
+      save_to: "reports/worker-a-attempt-{{attempt}}.md"
+    depends_on: [flaky-step]
+
+  - id: bad-node
+    task_type: bash
+    # 计数放 work_dir 根（.bad_node_count）：rollback_to=init 重跑 init 只会清
+    # output/reports，不会清它；每次新运行的清零由 bootstrap 完成
+    command: |
+      CNT=$(cat .bad_node_count 2>/dev/null || echo 0)
+      CNT=$((CNT+1))
+      echo $CNT > .bad_node_count
+      echo "bad-node attempt #$CNT"
+      if [ "$CNT" -lt 3 ]; then
+        echo "bad" > output/bad.txt
+      else
+        echo "done" > output/bad.txt
+      fi
+    acceptance:
+      enabled: true
+      type: script
+      script: grep -q "done" output/bad.txt
+      max_retries: 1
+      on_exhaust: rollback
+      rollback_to: init
+    report:
+      enabled: true
+      save_to: "reports/bad-node-attempt-{{attempt}}.md"
+    depends_on: [worker-a]
+
+  - id: final
+    task_type: bash
+    command: |
+      echo "final: all checks"
+      for f in init flaky worker-a; do
+        echo "check $f..." && cat output/$f.txt || echo "MISSING"
+      done
+      echo "ALL-DONE" > output/final.txt
+    acceptance:
+      enabled: true
+      type: script
+      script: |
+        for f in init.txt flaky.txt worker-a.txt; do
+          test -f output/$f || exit 1
+        done
+    depends_on: [bad-node]

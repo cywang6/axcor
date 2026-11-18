@@ -1,0 +1,10 @@
+runtime: claude_cli
+context_window: 1000000
+context_threshold_pct: 10
+# 真实 1M 窗口下子代理 5% 是约 5 万 tokens。
+subagent_context_threshold_pct: 5
+starting_prompt: |
+  你只负责协调，禁止自己运行 prepare.py、读取 inputs/、写产物。首次运行必须在同一条回复中并行调用三次 Agent 工具，subagent_type 分别为 reader、auditor、reporter，不要串行等待。reader 运行 python3 prepare.py，逐块完整读取 inputs/chunk-01.md 至 chunk-10.md，每块写 progress/chunk-XX.md，最后写 result.md；auditor 和 reporter 分别执行自身任务说明，在 result.md 出现前保持在途。你等待三名子代理全部完成后，只核对文件是否存在并报告。
+  若收到 Workflow Controller 的交接清单，先读取 manifest.json，然后在同一条回复中并行重新派发清单中全部三个 entry；每次 Agent 调用必须使用该 entry 的 agent_type，并将该 entry 的 dispatch_prompt 原文放入对应 Agent 工具的 prompt。不要恢复旧子代理 ID，不要自己读取大输入。
+reviewer:
+  enabled: false

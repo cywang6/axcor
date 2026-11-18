@@ -1,0 +1,97 @@
+# workflow-controller.yaml — AscendC 算子（aclnn 注册调用）registry workflow 的阶段门禁镜像。
+# 放在算子工作目录（= operators/<operator_name>/，即 validator 的 --operator-dir）。
+# 拷贝后改 <尖括号> 占位；stages 镜像 registry workflow，对所有算子通用、一般不动。
+
+runtime: opencode   # 须支持 Task/subagent 分发（claude_sdk 亦可）；GLM 走 opencode/claude_cli
+
+loop:
+  max_iterations: 30   # 11 阶段 + 每阶段 reviewer/重做余量 + spec/cp2/cp3 三道严格机器门可能失败重试；
+                       # 默认 10 远不够（11 阶段理想情况就要 11 轮），中途触顶会停死在半路。
+                       # 也兼兜底：某道机器门反复挂时，到顶停住避免无限烧 NPU；按实际可放宽/收紧。
+
+starting_prompt: |
+  任务：开发一个 AscendC 算子（aclnn 注册调用模式）：<operator_name> —— <一句话功能>。
+  你是 registry workflow 的 primary agent：加载 skill `ops-registry-invoke-workflow`，
+  按它的四阶段流程推进，用 Task 工具调度四个 subagent（architect / developer / tester / reviewer）。
+  本文件的 stages 是该 workflow 阶段边界的镜像——Workflow Controller 在每个边界强制顺序 + 机器门禁
+  （spec 9-stage / cp2 / cp3），其余语义审由 reviewer 把关。完整流程定义以该 skill 为准。
+  算子参数：<dtype / shape / 平台 / 是否含性能指标>。
+  按 requirements → spec → design → iter1 → iter2 → iter3 → dev_gate → whitebox
+  → torch_st → precision → release 推进。
+
+reviewer:
+  enabled: true
+  model: ''          # 空 → 读 env ANTHROPIC_MODEL
+  task_goal: |
+    交付 AscendC 算子 <operator_name>（aclnn 注册调用），按 registry 四阶段流程，
+    通过 spec 9-stage 与 cp2/cp3 机器门禁，ST 精度 100%，文档/示例/检视齐全。
+  timeout_seconds: 600.0
+
+stages:
+  # 阶段一·需求与设计（CP1/CP2 人工 gate → reviewer 语义审）
+  - name: requirements
+    artifacts:
+      - artifact: docs/REQUIREMENTS.md
+        gate: non_placeholder
+    description: 1.1-1.2 需求分析 + aclnnAPI 文档（CP1 人工确认）
+  - name: spec
+    artifacts:
+      - artifact: docs/spec.yaml          # command 门不看 artifact，但必填（anchor）
+        gate: command
+        command: 'python3 "${CANNBOT_SKILLS}/ops/ops-spec-gen/scripts/validate_spec.py" docs/spec.yaml'
+    description: 1.2.5 L0 数学契约 + 9-stage 机器校验（机器门，rc==0 才过）
+  - name: design
+    artifacts:
+      - artifact: docs/DESIGN.md          # TEST.md / PLAN.md / testcases CSV 同轮落盘
+        gate: non_placeholder
+    description: 1.3‖1.4 设计+测试设计 → 1.3R‖1.4R 评审（CP2 人工确认）
+
+  # 阶段二·开发（三轮迭代；iter 级无机器门，靠验收报告 + reviewer，与 registry 自身一致）
+  - name: iter1
+    artifacts:
+      - artifact: tests/reports/iter1-acceptance-report.md
+        gate: non_placeholder
+    description: 迭代一·骨架（单 TilingKey + 穿刺其他 Key）
+  - name: iter2
+    artifacts:
+      - artifact: tests/reports/iter2-acceptance-report.md
+        gate: non_placeholder
+    description: 迭代二·策略整合（多 TilingKey）
+  - name: iter3
+    artifacts:
+      - artifact: tests/reports/iter3-acceptance-report.md
+        gate: non_placeholder
+    description: 迭代三·全量覆盖
+  - name: dev_gate
+    artifacts:
+      - artifact: tests/reports/iter3-integration-report.md   # command 门不看 artifact，但必填（anchor）
+        gate: command
+        command: 'python3 "${CANNBOT_SKILLS}/plugins-official/ops-registry-invoke/workflow/resources/validate_workflow_state.py" --stage cp2 --operator-dir .'
+    description: 开发期证据机器门（cp2：UT + st_dev 黑盒，rc==0）
+
+  # 阶段二/三之间·备料
+  - name: whitebox
+    artifacts:
+      - artifact: tests/whitebox/
+        gate: non_placeholder
+    description: W·白盒测试生成+执行（TilingKey 分支覆盖）
+  - name: torch_st
+    artifacts:
+      - artifact: tests/st/torch/
+        gate: non_placeholder
+    description: C·PyTorch ST 适配层 + L0/L1 全量用例开发
+
+  # 阶段三·验收
+  - name: precision
+    artifacts:
+      - artifact: docs/precision-report.md   # command 门不看 artifact，但必填（anchor）
+        gate: command
+        command: 'python3 "${CANNBOT_SKILLS}/plugins-official/ops-registry-invoke/workflow/resources/validate_workflow_state.py" --stage cp3 --operator-dir .'
+    description: 3.1 最终精度验收机器门（cp3：UT + st_real + 白盒 + evidence_index，rc==0）
+
+  # 阶段四·上库
+  - name: release
+    artifacts:
+      - artifact: README.md                  # examples/ + docs/review-report.md 同轮落盘
+        gate: non_placeholder
+    description: 4.1 文档示例 + 4.2 代码检视 + 4.3 总结（CP5 人工确认）

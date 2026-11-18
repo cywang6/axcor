@@ -1,0 +1,5 @@
+name: fake_driver
+version: 0.1.0
+# 验收/冒烟用内置插件：注册 fake@1 run 驱动工厂，不接触任何 session 运行时。
+# 只有显式以该格式启动 run 才会生效。
+enabled: true

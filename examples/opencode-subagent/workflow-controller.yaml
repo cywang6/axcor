@@ -1,0 +1,16 @@
+runtime: opencode
+handoff_prompt_path: handoff-prompt.md
+continuation_prompt_path: continuation-prompt.md
+starting_prompt: |
+  任务：阅读 articles/ 目录下的体育新闻文章，生成摘要。
+
+  分三步执行：
+  0. 清理旧产物：用 Bash 执行 `rm -f articles/summary.md articles/done.md articles/files_exist.md`。然后用 Bash 执行 `ls articles/` 确认目录下有文件。如果有文件，用 Write 工具写入 `articles/files_exist.md`，内容为"文件存在"。
+  1. 用 task 工具起一个 reader subagent（subagent_type: reader），让它读取 articles/ 目录下的所有文件，并让它用 Write 工具把摘要写入 `articles/summary.md`。
+  2. 确认 `articles/summary.md` 已生成。用 Bash 执行 `ls articles/summary.md` 检查：存在则用 Write 工具写入 `articles/done.md`，内容为"任务完成"；否则写入"任务失败"。
+reviewer:
+  enabled: true
+  model: deepseek-v4-pro
+  timeout_seconds: 300.0
+  task_goal: |
+    完成 articles/ 目录下文章的摘要生成（确认文件 → subagent 读文章写 summary.md → 确认产物写 done.md）不要管占位/空壳文件的问题。

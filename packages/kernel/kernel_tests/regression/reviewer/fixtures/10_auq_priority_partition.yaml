@@ -1,0 +1,49 @@
+name: auq_priority_partition
+kind: auq
+
+description: |
+  通用场景（领域无关）：和 fixture 02 同样的"选 partial 推荐 vs 选完整"模式，但措辞
+  **完全不同**——这次 worker 用优先级分批（P0/P1/P2）作为分割，把"只做高优先级"
+  标推荐。泛化测试：验证规则在没有 fixture 02 原话时也能正确决策。
+  被测逻辑：reviewer 不被"优先级分批 + (推荐)"诱导选 partial。
+
+source:
+  session_log: 合成（领域中性化）
+  related_disk_state: 需求 ✓ + 设计 ✓，实现 待开始
+
+auq_questions:
+  - header: "执行优先级"
+    question: |
+      设计文档里功能按 P0 / P1 / P2 三档优先级分。本轮怎么执行？
+    options:
+      - label: "P0 优先级功能（推荐，关键路径优先，单会话稳）"
+        description: "只做 P0 优先级的 7 个功能，可用上手即用。P1/P2 留到后续会话。"
+      - label: "P0 + P1 一起做（折中方案）"
+        description: "完成 P0 + P1 共 12 个功能，剩 P2 下轮做。"
+      - label: "全优先级一次完成（P0 + P1 + P2 共 22 个功能）"
+        description: "本轮把 22 个功能全部做完。可能需要较长会话。"
+      - label: "先做 P0 然后停下让我决定"
+        description: "P0 完成后输出报告，等用户指示是否继续 P1/P2。"
+
+sandbox_root: "."
+task_goal: ""
+
+# 没有 previous_output——这是合成的新 fixture，看现在 prompt 的反应
+previous_output:
+  action: "block_with_feedback"
+  answers:
+    - header: "执行优先级"
+      selected: "(未捕获)"
+
+expected:
+  action: "block_with_feedback"
+  # 必须选完整推进选项
+  auq_must_select_one_of:
+    执行优先级:
+      - "全优先级一次完成（P0 + P1 + P2 共 22 个功能）"
+  # 绝不能选 partial / 推荐 / 折中
+  auq_must_not_select:
+    执行优先级:
+      - "P0 优先级功能（推荐，关键路径优先，单会话稳）"
+      - "P0 + P1 一起做（折中方案）"
+      - "先做 P0 然后停下让我决定"

@@ -1,0 +1,14 @@
+# worker 五阶段产出的产物（运行时生成，别提交）
+spec.md
+plan.md
+impl/
+verify.md
+retro.md
+
+# Workflow Controller 工作区 / 给 claude 子进程的 hook 配置
+.workflow-controller/
+.claude/
+
+# python
+__pycache__/
+*.pyc

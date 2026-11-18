@@ -1,0 +1,50 @@
+name: stop_false_all_missing
+kind: stop_hook
+
+description: |
+  通用场景（领域无关）：虚假"五个阶段全缺失"错判。worker 只是说后台 sub-agent
+  在跑（实现进行中），reviewer 却推断"五个阶段产物均不存在"。实际需求 + 设计
+  早已完整在磁盘。
+  被测逻辑：reviewer 不能在需求/设计已就绪时谎称"全部产物缺失"。
+
+source:
+  session_log: 合成（领域中性化）
+  related_disk_state: |
+    需求 ✓ + 设计 ✓（早已完成）；实现 进行中（3 个并行 sub-agent 在跑）；测试 ✗ + 文档 ✗
+
+worker_context: |
+  3 个 sub-agent 正在并行跑（数据模型、主题、资源模块）。等它们完成我会接着派发
+  依赖它们产出的下一批模块（事件桥接 + 公共组件 + 脚手架）。
+
+  Status:
+  - 实现·批次 0a：**3 个 sub-agent in flight**（模型 / 主题 / 资源）
+  - 实现·批次 0b：queued（依赖 0a）
+  - 其余模块：queued（批次 1-5）
+
+sandbox_root: "."
+task_goal: ""
+
+# 模拟当时磁盘：需求 + 设计 已完成，后 3 阶段缺失
+staged_disk:
+  - "docs/requirements.md"
+  - "docs/design.md"
+
+previous_output:
+  action: "block_with_feedback"
+  feedback: "需求/设计/实现/测试/文档 五个阶段产物均不存在。当前 worker 仅在跑实现批次 0a 的并行 sub-agent，尚未完成任何阶段。下一步：先生成需求产物。"
+  rationale: "五阶段产物全部缺失"
+
+expected:
+  action: "block_with_feedback"
+  # action=block 是判据（防谎称"五阶段全缺失"）；feedback 推 worker 继续（非确定措辞）。
+  feedback_must_include:
+    - "继续"
+  feedback_must_not_include:
+    # 不能说"五阶段全缺失"系列错误断言
+    - "五阶段"
+    - "五个阶段"
+    - "5 个阶段产物均"
+    - "5个阶段产物均"
+    - "需求/设计/实现/测试/文档 五"
+    - "全部产物均不存在"
+    - "尚未完成任何"

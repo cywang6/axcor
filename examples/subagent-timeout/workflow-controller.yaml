@@ -1,0 +1,35 @@
+runtime: opencode
+model: alibaba-cn/glm-5.2
+starting_prompt: |
+  你配合我测试一下 watchdog 的三条检测规则。
+
+  按以下顺序执行：
+  1. 用 Bash 执行 `rm -rf logs/`，确保从干净状态开始。
+  2. 用 Write 工具创建一个 `logs/log.md` 文件，内容为"初始化测试"。
+  3. 用 task 工具起一个 `sleeper` subagent，让它每 2 秒打印一行日志，共打印 5 次（约 10 秒），然后结束。
+  4. 用 task 工具先后起两个 subagent（任意 subagent_type），每个打印一行日志就结束。
+  5. 用 task 工具起一个 subagent（任意 subagent_type），让它用 Write 工具往 `logs/log.md` 写入"实现方案：membase"。
+  6. 回到主 agent，报告"测试完成"。
+
+  不需要读写其他文件，不需要做其他事情。
+reviewer:
+  enabled: true
+  model: deepseek-v4-pro
+  timeout_seconds: 300.0
+  task_goal: |
+    测试 watchdog subagent 超时检测 + 关键词检测 + 文件不变检测是否正常工作。
+watchdog:
+  subagent_timeout_seconds: 10
+  track_file: logs/log.md
+  file_stall_threshold: 3
+  track_keyword_file: logs/log.md
+  track_keyword: membase
+# 上传现场切片到 Context Bay（告警时点「上传现场到 Context Bay」按钮触发）：
+# 把下列目录/文件连同 session .db（insight 7 表格式）收集到以 session 名
+# 命名的单一文件夹，git commit + push 到 Context Bay 仓。
+# .db 由 context_bay_exporter 从 opencode.db / claude jsonl 自动生成。
+# snapshot_paths 路径相对 session 目录解析，可填目录或文件，可多项。
+context_bay:
+  repo_url: "https://gitcode.com/<owner>/<repo>.git"
+  snapshot_paths:
+    - logs/

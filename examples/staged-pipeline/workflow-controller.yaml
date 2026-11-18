@@ -1,0 +1,65 @@
+# staged-pipeline 门禁样例：罗马数字转换器（romanconv）。
+#
+# 用法：先在 web Settings → Plugins 启用 staged_pipeline plugin（全局，一次）；
+# 再主面板选本目录（examples/staged-pipeline）→ Start。worker 按 spec→plan→execute→
+# verify→retrospect 五阶段推进，门禁强制顺序 + 完成；任务说明见 sample-project/README.md。
+#
+# stages 和 starting_prompt / reviewer.task_goal 同在本文件——天然自洽（门禁查的结构
+# = prompt 要 worker 做的阶段）。换领域就改下面的 stages + starting_prompt + task_goal。
+# 项目设置（runtime / starting_prompt / loop / reviewer.task_goal）也能在 web
+# Settings → 项目设置 里改，save 直接写回本文件（保键合并，不动 stages）。
+
+runtime: claude_sdk
+
+starting_prompt: |
+  任务：交付一个罗马数字转换器（to_roman(int)→str、from_roman(str)→int）。完整需求
+  （功能 / 规则 / 验收 / 边界 case）见 sample-project/README.md，先读它。
+
+  按 spec → plan → execute → verify → retrospect 五阶段推进（逐阶段工作纪律——一轮一阶段、
+  写完该阶段产物即停下汇报、跨阶段跳步会被门禁拦回——已由 staged_pipeline plugin 自动注入
+  到本 prompt 前面，这里只写各阶段产物的领域内容）：
+  - spec：消化 sample-project/README.md 的需求，写 spec.md（功能 / 规则 / 边界 case / 验收标准）。
+  - plan：写 plan.md（to_roman / from_roman 的设计方案：符号表、贪心构造 / 左到右解析）。
+  - execute：在 impl/ 下实现代码 + 测试。
+  - verify：写 verify.md（跑测试的结果、覆盖了哪些边界 case）。
+  - retrospect：写 retro.md（什么顺、什么卡、改进点）。
+
+reviewer:
+  enabled: true
+  model: ''          # 空 → 读 env ANTHROPIC_MODEL
+  task_goal: |
+    交付一个罗马数字转换器（to_roman(int)→str、from_roman(str)→int，规则与边界见
+    sample-project/README.md），按 spec→plan→execute→verify→retrospect 五阶段推进，
+    每阶段产物实质、非占位，全部通过门禁。
+  timeout_seconds: 300.0
+
+stages:
+  - name: spec
+    artifacts:
+      - artifact: spec.md
+        gate: non_placeholder
+    description: 理解需求、输入输出、边界 case
+  - name: plan
+    artifacts:
+      - artifact: plan.md
+        gate: non_placeholder
+    description: 设计方案
+  - name: execute
+    artifacts:
+      - artifact: impl/
+        gate: non_placeholder
+    description: 实现代码
+  - name: verify
+    artifacts:
+      - artifact: verify.md
+        gate: non_placeholder
+    # 想接客观信号可换成命令门禁（样例用 non_placeholder 以求领域无关、能跑）：
+    # - artifact: verify.md
+    #   gate: command
+    #   command: "pytest -q"
+    description: 验证
+  - name: retrospect
+    artifacts:
+      - artifact: retro.md
+        gate: non_placeholder
+    description: 回顾

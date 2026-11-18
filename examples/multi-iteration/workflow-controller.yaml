@@ -1,0 +1,56 @@
+# ─────────────────────────────────────────────────────────────
+# multi-iteration sample — 用 AUQ 门禁划分阶段
+# ─────────────────────────────────────────────────────────────
+# 验证 loop 的「门禁/人中途接管」能力（MigBot CP 门禁的通用版）：
+# worker 每做完一个阶段，用 AskUserQuestion 问 reviewer「该阶段通过吗」，
+# reviewer(auto)或人(manual)答门禁 → 过则下一阶段，需改则改。
+# AUQ 是 query 内的门禁（强制 worker 停等答案），不是 prompt 纪律。
+#
+# 这比 feedback evaluator 更能演示 loop 的「可接管控制面」：
+# - Interactions 面板有门禁事件（AUQ 选项 + reviewer 答复）
+# - manual 时人在 InputBox 答 gate；auto 时 reviewer 答
+# ─────────────────────────────────────────────────────────────
+
+project_dir: ./sample-project
+
+runtime: claude_cli   # AUQ 门禁需要 CLI（claude_sdk 的 in-process SDK 没有 AskUserQuestion 工具）
+
+system_prompt: |
+  你是分阶段 worker。铁律：每写完一个阶段产物（如 cli.py / test_calc.py / README.md），
+  下一个动作必须是用 AskUserQuestion 工具问 reviewer「该阶段是否通过」（选项：通过 / 需改进）。
+  拿到 reviewer「通过」前，绝不开始下一阶段。一轮只产出一个文件。
+  跳过门禁 = 任务失败。
+
+# evaluator 用 passthrough（query 内 AUQ 门禁已划分阶段；
+# query 结束=全阶段过=完成）
+loop:
+  evaluator: passthrough
+  max_iterations: 3
+
+reviewer:
+  enabled: true
+  model: ""             # auto 时 reviewer 答 gate；留空读 env
+  task_goal: |
+    计算器 CLI 工程补全三阶段：cli.py（命令行入口）→ test_calc.py（测试，需过）→ README.md（文档）。
+    每个阶段 worker 会用 AskUserQuestion 问你「该阶段是否通过」。按实际质量答：
+    产物合格 → 选「通过」；有问题 → 选「需改进」并在 feedback 说具体改什么。
+    三阶段全过才算完成。
+
+starting_prompt: |
+  sample-project/calc.py 已写好（算术表达式计算器核心，ast parse+eval）。
+
+  分 3 阶段补全，每阶段做完必须用 AskUserQuestion 工具问 reviewer 该阶段是否通过，
+  不要自己往下做——必须等 gate 答复：
+
+  - 阶段1：写 cli.py（命令行入口，`python cli.py "1+2*3"` 输出 7）。写完立即用
+    AskUserQuestion 问：「cli.py 阶段是否通过？」选项：通过 → 进阶段2 / 需改进 → 按反馈改。
+  - 阶段2（通过后）：写 test_calc.py（测试 calc.evaluate）。写完 AUQ 问通过否。
+  - 阶段3（通过后）：写 README.md（用法+示例）。写完 AUQ 问通过否。
+
+  关键：每个阶段做完只做两件事 —— ①产出该阶段文件 ②调 AskUserQuestion 问 gate。
+  绝不在拿到 gate「通过」前就做下一阶段。
+
+hook_server:
+  enabled: true
+  host: 127.0.0.1
+  port: 18765

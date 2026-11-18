@@ -1,0 +1,13 @@
+runtime: claude_cli
+context_window: 1000000
+context_threshold_pct: 1
+subagent_context_threshold_pct: 1
+handoff_prompt_path: handoff-instructions.md
+starting_prompt: |
+  你只负责协调；不要自己读取 brief.md、inputs/ 或检查目录。立即在同一轮并行调用三次 Agent 工具，分别派发：
+  1. researcher 先运行 python3 wait_for_checklist.py 等待 checklist.md，之后阅读 brief.md 和 checklist.md，写出 research.md。
+  2. checker 运行 python3 prepare.py，逐块完整读取 inputs/chunk-01.md 至 chunk-04.md，每块写 progress/chunk-XX.md，最后根据 brief.md 写出 checklist.md。
+  3. writer 先运行 python3 wait_for_checklist.py 等待 checklist.md，之后阅读 brief.md 和 checklist.md，写出 outline.md。
+  等三名子代理返回后，只核对三个产物是否存在并报告完成情况。不要亲自写这些文件。收到交接清单时，严格按交接指令重新派发。
+reviewer:
+  enabled: false

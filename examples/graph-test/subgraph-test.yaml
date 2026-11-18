@@ -1,0 +1,117 @@
+workflow: subgraph-test
+description: 测试子图 generator 节点 — bash 生成含并行分支+agent 节点的子工作流并递归编排，父图验证子产物
+max_parallel: 2
+work_dir: .
+agents_dir: ./agents
+nodes:
+  - id: init
+    task_type: bash
+    command: rm -rf output reports && mkdir -p output reports && echo "init-ok" > output/init.txt
+    acceptance:
+      enabled: true
+      type: script
+      script: test -f output/init.txt
+    depends_on: []
+
+  - id: gen-sub
+    task_type: generator
+    generator_type: bash
+    # heredoc 产出子工作流 yaml：块标量 | 剥离公共缩进，运行时 EOF 位于行首，勿改动缩进
+    command: |
+      cat > output/sub-workflow.yaml <<'EOF'
+      workflow: sub-demo
+      max_parallel: 2
+      work_dir: .
+      agents_dir: ./agents
+      nodes:
+        - id: sub-init
+          task_type: bash
+          command: echo "sub-init-ok" > output/sub-init.txt
+          acceptance:
+            enabled: true
+            type: script
+            script: test -s output/sub-init.txt
+          depends_on: []
+        - id: sub-agent-a
+          task_type: agent
+          executor: simple-worker
+          task_description: "创建 output/sub-a.txt 并写入 sub-a-done。完成后回复 DONE。"
+          task_goal: "产出 output/sub-a.txt，内容为 sub-a-done。完成后返回 DONE。"
+          acceptance:
+            enabled: true
+            type: script
+            script: grep -q sub-a-done output/sub-a.txt
+          depends_on: [sub-init]
+        - id: sub-agent-b
+          task_type: agent
+          executor: simple-worker
+          task_description: "创建 output/sub-b.txt 并写入 sub-b-done。完成后回复 DONE。"
+          task_goal: "产出 output/sub-b.txt，内容为 sub-b-done。完成后返回 DONE。"
+          acceptance:
+            enabled: true
+            type: script
+            script: grep -q sub-b-done output/sub-b.txt
+          depends_on: [sub-init]
+        - id: sub-verify
+          task_type: bash
+          command: |
+            echo "sub-verify: checking all artifacts"
+            cat output/sub-a.txt output/sub-b.txt > output/sub-merged.txt
+          acceptance:
+            enabled: true
+            type: script
+            script: |
+              test -s output/sub-merged.txt &&
+                grep -q sub-a-done output/sub-merged.txt &&
+                grep -q sub-b-done output/sub-merged.txt
+          depends_on: [sub-agent-a, sub-agent-b]
+      EOF
+    subgraph:
+      output: output/sub-workflow.yaml
+    acceptance:
+      enabled: true
+      type: script
+      script: test -s output/sub-workflow.yaml
+    depends_on: [init]
+
+  - id: post-agent
+    task_type: agent
+    executor: simple-worker
+    task_description: "基于子图产物生成汇总报告。"
+    task_goal: "读取 output/sub-merged.txt 内容，创建 output/report.txt，第一行写 REPORT，第二行原样写入 sub-merged.txt 的内容。完成后返回 DONE。"
+    acceptance:
+      enabled: true
+      type: agent
+      verifier: simple-verifier
+      verifier_prompt: "检查 output/report.txt 是否存在、第一行是 REPORT、且包含 sub-a-done 和 sub-b-done。通过即 PASS，否则 FAILED 并说明原因。"
+    depends_on: [gen-sub]
+
+  - id: post-check
+    task_type: bash
+    command: |
+      echo "post-check: subgraph artifact audit"
+      echo "sub-merged: $(cat output/sub-merged.txt)"
+      echo "node count: $(ls output/*.txt | wc -l)"
+    acceptance:
+      enabled: true
+      type: script
+      script: |
+        test -s output/sub-merged.txt &&
+          grep -q sub-a-done output/sub-merged.txt &&
+          grep -q sub-b-done output/sub-merged.txt
+    depends_on: [gen-sub]
+
+  - id: final-report
+    task_type: bash
+    command: |
+      echo "=== final report ==="
+      echo "report: $(cat output/report.txt)"
+      echo "ALL-PASSED" > output/final.txt
+    acceptance:
+      enabled: true
+      type: script
+      script: |
+        test -s output/report.txt &&
+          grep -q REPORT output/report.txt &&
+          test -s output/final.txt
+    depends_on: [post-agent, post-check]

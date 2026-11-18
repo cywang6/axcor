@@ -1,0 +1,44 @@
+# ─────────────────────────────────────────────────────────────
+# Workflow Controller — cannbot 算子生成配置示例
+# ─────────────────────────────────────────────────────────────
+# project_dir: Workflow Controller 生成算子的目标工程。worker 以 cwd=project_dir
+#   运行，.workflow-controller/ 工作区（sessions / 日志 / 交接文档）也落在这里。
+#   指向一个已装好 cannbot plugin 的工程。
+#
+# runtime: 用哪个 Claude 驱动。
+#   - claude_sdk (默认): 原生 Anthropic，经 Agent SDK。sk-ant-... key +
+#                OAuth 开箱即用。
+#   - claude_cli: 第三方 / GLM 端点。在 shell 里设这些 env，Workflow Controller 会透传
+#                给 CLI（CLI 以 {**os.environ, **env} 合并）：
+#                    ANTHROPIC_BASE_URL   = https://open.bigmodel.cn/api/anthropic
+#                    ANTHROPIC_AUTH_TOKEN = <glm token>      # Bearer 鉴权
+#                    ANTHROPIC_MODEL      = glm-5.2
+#                GLM key 走 Bearer（ANTHROPIC_AUTH_TOKEN）而非 x-api-key；
+#                原生 sk-ant- key（无 base_url）仍走 x-api-key。
+# ─────────────────────────────────────────────────────────────
+
+project_dir: .
+
+# 可选：自定义 skills/agents 根目录（否则走 marketplace）。
+# skills_path: /path/to/project/.claude/skills
+# agents_path: /path/to/project/.claude/agents
+
+# Verbatim worker prompt（不做 {placeholder} 替换）。
+starting_prompt: |
+  生成 cannbot 算子：阅读目标工程结构与已有算子范式，按规范产出目标算子并补齐编译验证。
+
+runtime: claude_sdk   # GLM 用户改 claude_cli 并配上面 env
+
+reviewer:
+  enabled: true
+  # mode (auto | manual) 是 orchestrator 运行时状态，经 /api/config GET/PUT
+  # 往返，不在 yaml 持久化；这里不配，默认 auto。
+  model: ""   # 留空 → SDK 读 env ANTHROPIC_MODEL（GLM/第三方无需写死；原生 sk-ant 用户也可留空）
+  task_goal: |
+    完成算子生成任务：理解目标算子语义 → 参照已有算子实现范式 → 产出代码/接口 → 自验证可编译。
+    任务未完成前不要选择"结束本轮/收尾"类选项；优先"继续"。
+
+hook_server:
+  enabled: true
+  port: 18765
+  host: localhost

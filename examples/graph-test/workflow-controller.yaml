@@ -1,0 +1,8 @@
+project_dir: ./
+runtime: opencode
+reviewer:
+  enabled: false
+loop:
+  evaluator: always_complete
+  max_iterations: 1
+graph_yaml: graph-workflow.yaml

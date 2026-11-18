@@ -1,0 +1,29 @@
+{
+  "name": "@workflow-controller/file-provenance",
+  "version": "1.0.0",
+  "description": "OpenCode file provenance capture backed by Workflow Controller",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.18.0 <1.19.0"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "1.18.23",
+    "@types/node": "^22.18.0",
+    "typescript": "^5.9.2"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT"
+}

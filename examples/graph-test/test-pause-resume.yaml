@@ -1,0 +1,31 @@
+workflow: test-pause-resume
+description: 快速测试 pause/resume（5s 执行 + 5s 验收，并行 node）
+max_parallel: 2
+work_dir: .
+nodes:
+  - id: A
+    task_type: bash
+    command: echo "A-start" && sleep 5 && echo "A-done" > output_a.txt
+    acceptance:
+      enabled: true
+      type: script
+      script: test -f output_a.txt && grep -q "A-done" output_a.txt
+    depends_on: []
+
+  - id: B
+    task_type: bash
+    command: echo "B-start" && sleep 5 && echo "B-done" > output_b.txt
+    acceptance:
+      enabled: true
+      type: script
+      script: test -f output_b.txt && grep -q "B-done" output_b.txt
+    depends_on: []
+
+  - id: C
+    task_type: bash
+    command: echo "C-start" && sleep 5 && echo "C-done" > output_c.txt
+    acceptance:
+      enabled: true
+      type: script
+      script: test -f output_c.txt && grep -q "C-done" output_c.txt
+    depends_on: ["A", "B"]

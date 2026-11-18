@@ -1,0 +1,1 @@
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1779415200,"rateLimitType":"seven_day","utilization":0.5,"isUsingOverage":false,"surpassedThreshold":0.5},"uuid":"synthetic-low-util","session_id":"synthetic-1"}
