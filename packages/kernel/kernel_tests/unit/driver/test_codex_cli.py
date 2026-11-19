@@ -34,6 +34,7 @@ from workflow_controller.driver.codex_cli import (
     _codex_proc_env,
     _codex_subagent_fact,
     _drain_stderr,
+    _stderr_tail_text,
 )
 from workflow_controller.driver.hooks import (
     CodexHookConfigWriter,
@@ -840,8 +841,8 @@ class TestBuildArgs:
 
 
 @pytest.mark.asyncio
-async def test_drain_stderr_downgrades_hook_trust_warning(caplog):
-    """Hook trust 的预期提示降级为 debug。"""
+async def test_drain_stderr_downgrades_known_and_unknown_noise(caplog):
+    """Hook trust、cpx 状态、stdin 提示与普通文本都降级为 debug。"""
 
     class FakeStderr:
         """逐行输出预设 stderr。"""
@@ -857,20 +858,48 @@ async def test_drain_stderr_downgrades_hook_trust_warning(caplog):
                 return self.lines.pop(0).encode()
             raise StopAsyncIteration
 
-    warning = (
+    hook_warning = (
         "`--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run "
         "without review for this invocation."
     )
-    proc = SimpleNamespace(stderr=FakeStderr([warning, "unexpected warning"]))
+    lines = [
+        hook_warning,
+        "Reading additional input from stdin...",
+        "[cpx-cli] launching: codex exec --json",
+        "[cpx-cli] ERROR: launch failed",
+        "plain continuation text",
+    ]
+    proc = SimpleNamespace(stderr=FakeStderr(lines))
     tail = deque()
+    error_tail = deque()
 
     with caplog.at_level(logging.DEBUG, logger="workflow_controller.driver.codex_cli"):
-        await _drain_stderr(proc, tail)
+        await _drain_stderr(proc, tail, error_tail)
 
     assert [record.levelno for record in caplog.records] == [
         logging.DEBUG,
-        logging.WARNING,
+        logging.DEBUG,
+        logging.DEBUG,
+        logging.ERROR,
+        logging.DEBUG,
     ]
+    assert list(error_tail) == ["[cpx-cli] ERROR: launch failed"]
+
+
+@pytest.mark.asyncio
+async def test_drain_stderr_warns_errors_and_preserves_error_tail():
+    """错误行记错误日志且单独保留，不被后续普通行挤出 tail。"""
+    error = "2026-11-17T00:00:00.000000Z ERROR codex_core: boom"
+    lines = [f"{error}\n".encode()] + [f"normal {i}\n".encode() for i in range(25)]
+    proc = SimpleNamespace(stderr=_FakeCodexErr(lines))
+    tail = deque(maxlen=20)
+    error_tail = deque(maxlen=20)
+
+    await _drain_stderr(proc, tail, error_tail)
+
+    assert list(error_tail) == [error]
+    assert len(tail) == 20
+    assert _stderr_tail_text(tail, error_tail).startswith(error)
 
 
 @pytest.mark.asyncio

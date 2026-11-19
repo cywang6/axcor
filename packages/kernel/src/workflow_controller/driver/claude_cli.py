@@ -23,6 +23,7 @@ import logging
 import os
 import stat
 import tempfile
+from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -35,6 +36,7 @@ from workflow_controller.driver.cli_base import (
     CLIDriverBase,
     QueryOptions,
     error_end_events,
+    is_stderr_error_line,
     kill_proc_group,
     spawn_failure_events,
 )
@@ -53,6 +55,12 @@ logger = logging.getLogger(__name__)
 # 收尾时排空 stderr 的上限：CLI 派生的分离孙进程可能持有 stderr 写端，管道永不
 # EOF，`_drain_stderr` 会无限挂起。超过该值即带已收集到的 stderr 行继续收尾。
 _STDERR_DRAIN_TIMEOUT_SECONDS = 5.0
+_STDERR_LINE_LOG_CHARS = 300
+_STDERR_TAIL_LINES = 20
+_STDERR_STATUS_PREFIXES = (
+    "Reading additional input from stdin...",
+    "[cpx-cli]",
+)
 
 
 class ClaudeCLIExitError(RuntimeError):
@@ -324,8 +332,15 @@ class ClaudeCLIDriver(CLIDriverBase):
         if proc.stdin is None:
             raise RuntimeError("claude 子进程 stdin 未创建")
         proc.stdin.close()
-        run_state["stderr_lines"] = []
-        self._stderr_task = asyncio.ensure_future(_drain_stderr(proc, run_state["stderr_lines"]))
+        run_state["stderr_lines"] = deque(maxlen=_STDERR_TAIL_LINES)
+        run_state["stderr_error_lines"] = deque(maxlen=_STDERR_TAIL_LINES)
+        self._stderr_task = asyncio.ensure_future(
+            _drain_stderr(
+                proc,
+                run_state["stderr_lines"],
+                run_state["stderr_error_lines"],
+            )
+        )
         id_ready = asyncio.Event()
         run_state["id_ready"] = id_ready
         run_state["child_poller"] = _start_child_poller(
@@ -369,13 +384,8 @@ class ClaudeCLIDriver(CLIDriverBase):
         # 否则「工作实际已完成」的会话会被误报为失败。error 子类型的 result 行不视为
         # 完成——CLI 产出 error result 后非零退出仍上报退出码，不吞掉失败详情。
         if proc.returncode and not self._stop_event.is_set() and not run_state["result_received"]:
-            reason = next(
-                (
-                    line
-                    for line in reversed(run_state["stderr_lines"])
-                    if "SessionEnd hook" not in line
-                ),
-                "no error detail from Claude CLI",
+            reason = _stderr_error_reason(
+                run_state["stderr_lines"], run_state["stderr_error_lines"]
             )
             raise ClaudeCLIExitError(f"Claude CLI exited with code {proc.returncode}: {reason}")
         return Event.create(
@@ -583,15 +593,16 @@ def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
 
 async def _drain_stderr(
     proc: asyncio.subprocess.Process,
-    lines: list[str] | None = None,
+    lines: deque[str],
+    error_lines: deque[str],
 ) -> None:
-    """Log stderr output from the claude subprocess."""
+    """泵干 claude stderr：状态/普通行降 debug，错误行告警并优先保留。"""
     try:
         if proc.stderr is None:
             raise RuntimeError("claude 子进程 stderr 未创建")
         # 与 stdout 一致的分块切行，避免 LimitOverrunError 提前终止 drain。
         async for line_bytes in _split_lines(proc.stderr):
-            _log_stderr_line(line_bytes, lines)
+            _log_stderr_line(line_bytes, lines, error_lines)
     except Exception:
         logger.debug("stderr drain ended", exc_info=True)
 
@@ -617,13 +628,38 @@ async def _split_lines(reader: StreamReader) -> AsyncIterator[bytes]:
         yield bytes(buf)
 
 
-def _log_stderr_line(line_bytes: bytes, lines: list[str] | None = None) -> None:
+def _log_stderr_line(
+    line_bytes: bytes,
+    lines: deque[str],
+    error_lines: deque[str],
+) -> None:
     line = line_bytes.decode("utf-8", errors="replace").strip()
-    if line:
-        logger.warning("claude stderr: %s", line[:300])
-        if lines is not None:
-            lines.append(line[:300])
-            del lines[:-10]
+    if not line:
+        return
+    if is_stderr_error_line(line):
+        bounded_line = line[:_STDERR_LINE_LOG_CHARS]
+        error_lines.append(bounded_line)
+        logger.error("claude stderr: %s", bounded_line)
+    elif line.startswith(_STDERR_STATUS_PREFIXES):
+        bounded_line = line[:_STDERR_LINE_LOG_CHARS]
+        lines.append(bounded_line)
+        logger.debug("claude stderr: %s", bounded_line)
+    else:
+        bounded_line = line[:_STDERR_LINE_LOG_CHARS]
+        lines.append(bounded_line)
+        logger.debug("claude stderr: %s", bounded_line)
+
+
+def _stderr_error_reason(lines: deque[str], error_lines: deque[str]) -> str:
+    """错误行优先，避免长段噪声把真实异常挤出退出详情。"""
+    return next(
+        (
+            line
+            for line in [*reversed(error_lines), *reversed(lines)]
+            if "SessionEnd hook" not in line
+        ),
+        "no error detail from Claude CLI",
+    )
 
 
 def _child_transcripts(cwd: str, parent_id: str, env: dict[str, str]) -> dict[str, Path]:

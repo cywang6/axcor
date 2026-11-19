@@ -31,6 +31,7 @@ from workflow_controller.driver.cli_base import (
     QueryOptions,
     drain_proc_stderr,
     error_end_events,
+    is_stderr_error_line,
     iter_proc_line_batches,
     kill_proc_group,
     spawn_failure_events,
@@ -51,7 +52,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _KNOWN_SANDBOX_MODES = {"read-only", "workspace-write", "danger-full-access"}
+_STDERR_LINE_LOG_CHARS = 300
 _STDERR_TAIL_LINES = 20
+_STDERR_ERROR_TAIL_LINES = 20
+_STDERR_STATUS_PREFIXES = (
+    "Reading additional input from stdin...",
+    "[cpx-cli]",
+)
 
 _CODEX_SECRET_PREFIXES = (
     "ANTHROPIC_",
@@ -466,7 +473,10 @@ class CodexCLIDriver(CLIDriverBase):
                 raise RuntimeError("codex 子进程 stdin 未创建")
             proc.stdin.close()
             stderr_tail: deque[str] = deque(maxlen=_STDERR_TAIL_LINES)
-            self._stderr_task = asyncio.ensure_future(_drain_stderr(proc, stderr_tail))
+            stderr_error_tail: deque[str] = deque(maxlen=_STDERR_ERROR_TAIL_LINES)
+            self._stderr_task = asyncio.ensure_future(
+                _drain_stderr(proc, stderr_tail, stderr_error_tail)
+            )
 
             flags: dict[str, bool] = {"saw_error": False, "turn_completed": False}
             async for event in self._stream_line_events(
@@ -479,7 +489,7 @@ class CodexCLIDriver(CLIDriverBase):
             ):
                 yield event
             async for event in self._proc_exit_events(
-                proc, stderr_tail, flags, session_id, iteration
+                proc, stderr_tail, stderr_error_tail, flags, session_id, iteration
             ):
                 yield event
         except asyncio.CancelledError:
@@ -532,6 +542,7 @@ class CodexCLIDriver(CLIDriverBase):
         self,
         proc: asyncio.subprocess.Process,
         stderr_tail: deque[str],
+        stderr_error_tail: deque[str],
         flags: dict[str, bool],
         session_id: str,
         iteration: int,
@@ -555,7 +566,7 @@ class CodexCLIDriver(CLIDriverBase):
             and not flags["saw_error"]
         )
         if is_abnormal_exit:
-            tail_text = "\n".join(stderr_tail).strip()
+            tail_text = _stderr_tail_text(stderr_tail, stderr_error_tail)
             error = f"codex exited with code {proc.returncode}"
             if tail_text:
                 error += f": {tail_text}"
@@ -666,17 +677,30 @@ def _sandbox_args(permission_mode: str) -> list[str]:
 async def _drain_stderr(
     proc: asyncio.subprocess.Process,
     tail: deque[str],
+    error_tail: deque[str],
 ) -> None:
-    """泵干 codex stderr：hook-trust 预期提示降 debug，其余告警；尾部行滚动入 tail。"""
+    """泵干 codex stderr：状态/普通行降 debug，错误行记错误日志并优先保留。"""
 
     def _handle(line: str) -> None:
-        tail.append(line)
-        if all(marker in line for marker in _HOOK_TRUST_WARNING_MARKERS):
-            logger.debug("codex stderr: %s", line[:300])
+        bounded_line = line[:_STDERR_LINE_LOG_CHARS]
+        if is_stderr_error_line(line):
+            error_tail.append(bounded_line)
+            logger.error("codex stderr: %s", bounded_line)
+        elif all(marker in line for marker in _HOOK_TRUST_WARNING_MARKERS) or line.startswith(
+            _STDERR_STATUS_PREFIXES
+        ):
+            tail.append(bounded_line)
+            logger.debug("codex stderr: %s", bounded_line)
         else:
-            logger.warning("codex stderr: %s", line[:300])
+            tail.append(bounded_line)
+            logger.debug("codex stderr: %s", bounded_line)
 
     await drain_proc_stderr(proc, _handle)
+
+
+def _stderr_tail_text(tail: deque[str], error_tail: deque[str]) -> str:
+    """错误行优先，普通行限量；异常退出时避免长段噪声挤掉真实诊断。"""
+    return "\n".join([*error_tail, *tail]).strip()
 
 
 # ── JSONL line → Event conversion (module-level, driver-internal) ──────────

@@ -20,7 +20,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -35,7 +34,7 @@ _EMPTY_KEY_STATUS: dict[str, Any] = {
 
 
 class ProviderInUseError(ValueError):
-    """A retained session still refers to a provider index that would move."""
+    """A running session still uses the provider being deleted."""
 
 
 class AuthAPI:
@@ -43,49 +42,6 @@ class AuthAPI:
 
     def __init__(self, orchestrator: Orchestrator) -> None:
         self._orch = orchestrator
-
-    @staticmethod
-    def _raise_if_index_would_shift(
-        provider_index: int,
-        session_id: str,
-        indices: list[int | None],
-        provider_count: int,
-    ) -> None:
-        # 只拦删除会使「当前仍有效」的索引前移的引用；越界索引（provider_count
-        # 内不存在）本就失效，删除不会让它错绑到别的 key/model，忽略之。
-        blocking = next(
-            (
-                index
-                for index in indices
-                if index is not None and provider_index <= index < provider_count
-            ),
-            None,
-        )
-        if blocking is not None:
-            raise ProviderInUseError(
-                f"session {session_id} references provider index {blocking} "
-                f"(deleting index {provider_index} would shift it)"
-            )
-
-    @staticmethod
-    def _persisted_provider_indices(row: dict[str, Any]) -> list[int | None]:
-        raw = row.get("config_json")
-        if not raw:
-            return []
-        if isinstance(raw, str):
-            try:
-                cfg = json.loads(raw)
-            except (json.JSONDecodeError, TypeError):
-                return []
-        else:
-            cfg = raw
-        if not isinstance(cfg, dict):
-            return []
-        indices: list[int | None] = [cfg.get("provider_index")]
-        reviewer = cfg.get("reviewer")
-        if isinstance(reviewer, dict):
-            indices.append(reviewer.get("provider_index"))
-        return indices
 
     def key_status(self) -> dict[str, Any]:
         """key 轮换状态载荷。"""
@@ -110,32 +66,107 @@ class AuthAPI:
         return {"ok": True}
 
     async def delete_provider(self, provider_index: int) -> bool:
+        """删除 provider；仅活跃会话阻塞，池内非活跃会话清空绑定。
+
+        历史会话不阻塞删除，但其 provider 索引是删除前列表的位置坐标：
+        删除低位会让高位索引静默指向另一个 provider。池内非活跃会话
+        （Run 页重启会续跑）删除后统一置 None——重启时
+        _ensure_session_snapshots 补绑当前默认，语义与「供应商已删」
+        一致。池外持久化会话无运行时副本，其重启路径（restore →
+        restart）以显式报错收场，不做全表改写。
+
+        运行中（含暂停，恢复瞬间会拿旧索引热查）会话仍拒绝，避免热错绑。
+        """
         rotator = self._rotator()
         if rotator is None:
             raise RuntimeError("auth rotator not available")
         if not 0 <= provider_index < rotator.get_provider_count():
             return False
         provider_count = rotator.get_provider_count()
+
+        from workflow_controller.session.session import SessionState
+
+        active_states = {
+            SessionState.CREATING,
+            SessionState.RUNNING,
+            SessionState.PAUSED,
+            SessionState.WAITING_RETRY,
+        }
+        # Session.stop() 不清 pause_requested：先暂停再停止（含 stop-all）
+        # 会留下 state=STOPPED + pause_requested=True 的终态。硬终态必须
+        # 先排除，否则已停止会话被 pause_requested 误判为活跃，用户按
+        # 「请先停止」提示操作也无法解除 409。
+        terminal_states = {
+            SessionState.STOPPED,
+            SessionState.COMPLETED,
+            SessionState.FAILED,
+        }
+        blocked_ids: list[str] = []
         for session in self._orch.pool.list_sessions():
+            if session.state in terminal_states:
+                continue
+
+            # 真实暂停路径（Session.pause）置 state=IDLE + pause_requested=True，
+            # PAUSED 状态只在 wait_if_paused 竞态窗口短暂出现。必须按
+            # pause_requested 判定，否则暂停会话被当历史会话跳过；恢复后
+            # play() 置 RUNNING，下一次 query 用旧索引解析即热错绑。
+            if (
+                not getattr(session, "pause_requested", False)
+                and session.state not in active_states
+            ):
+                continue
             config = session.config
             reviewer_index = config.reviewer.provider_index if config.reviewer is not None else None
-            self._raise_if_index_would_shift(
-                provider_index,
-                session.id,
-                [config.provider_index, reviewer_index],
-                provider_count,
+            # 拦截移位区间 [被删索引, provider_count)：删除低位 provider 会让
+            # 更高索引整体下移，运行中会话每轮 query 都拿旧索引解析 provider，
+            # 同索引已指向另一个 key/model（模型相同时甚至无任何告警回调）。
+            # 越界索引本就失效，不拦。
+            shifted = [
+                index
+                for index in (config.provider_index, reviewer_index)
+                if isinstance(index, int) and provider_index <= index < provider_count
+            ]
+            if shifted:
+                blocked_ids.append(session.id)
+        if blocked_ids:
+            raise ProviderInUseError(
+                f"以下会话正在使用该供应商：{', '.join(blocked_ids)}。请先停止后再删除。"
             )
-        # 池外持久化会话（graph 成员完成/被丢弃后仍保留快照，恢复时重新绑定索引）
-        event_router = getattr(self._orch, "event_router", None)
-        if event_router is not None:
-            for row in await asyncio.to_thread(event_router.list_sessions_sync):
-                self._raise_if_index_would_shift(
-                    provider_index,
-                    row.get("id", ""),
-                    self._persisted_provider_indices(row),
-                    provider_count,
-                )
-        return await asyncio.to_thread(rotator.delete_provider, provider_index)
+
+        # 先快照池内「非活跃」会话再删除：删除失败（settings.conf 陈旧
+        # 不一致）时零副作用。硬终态确定不可续跑，pause_requested 残留
+        # （stop() 不复位）不影响判定；IDLE 仅无暂停标志才算非活跃。
+        # 409 阶段已保证活跃/暂停会话不引用被删项；其余会话清空绑定后，
+        # 重启时走 _ensure_session_snapshots 的默认 provider 补绑。
+
+        def _is_inactive(session: Any) -> bool:
+            if session.state in terminal_states:
+                return True
+            return (
+                not getattr(session, "pause_requested", False)
+                and session.state not in active_states
+            )
+
+        inactive_sessions = [s for s in self._orch.pool.list_sessions() if _is_inactive(s)]
+
+        # rotator.delete_provider 内部读写 settings.conf（阻塞磁盘 I/O）。本方法
+        # 被 auth_delete_key 路由 await，必须放线程池执行；直接同步调用会阻塞
+        # 事件循环（SSE 流、其他会话 query、并发请求全部卡住）。
+        if not await asyncio.to_thread(rotator.delete_provider, provider_index):
+            return False
+        for session in inactive_sessions:
+            changed = False
+            if session.config.provider_index is not None:
+                session.config.provider_index = None
+                changed = True
+            if session.config.reviewer is not None and (
+                session.config.reviewer.provider_index is not None
+            ):
+                session.config.reviewer.provider_index = None
+                changed = True
+            if changed:
+                await self._orch.pool.persist(session)
+        return True
 
     def activate_provider(self, index: Any) -> dict[str, Any]:
         """按序号激活 provider。"""

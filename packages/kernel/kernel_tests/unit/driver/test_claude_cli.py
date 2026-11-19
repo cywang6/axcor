@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+from collections import deque
 from unittest.mock import AsyncMock
 
 import pytest
@@ -26,6 +28,7 @@ from workflow_controller.driver.claude_cli import (
     ClaudeCLIExitError,
     _build_args,
     _cli_line_to_events,
+    _log_stderr_line,
     _split_lines,
     ensure_workspace_trusted,
 )
@@ -304,6 +307,72 @@ async def test_stderr_drain_timeout_does_not_hang(tmp_path, monkeypatch):
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_spawn)
     events = [event async for event in driver.query("prompt", session_id="sid", cwd=str(tmp_path))]
     assert [event.event_type for event in events] == [EventType.ITERATION_END]
+
+
+@pytest.mark.asyncio
+async def test_stderr_semantic_levels_and_error_tail(caplog):
+    """cpx/stdin/普通文本降 debug，ERROR 行记错误日志且单独保留。"""
+    lines = deque(maxlen=20)
+    error_lines = deque(maxlen=20)
+
+    with caplog.at_level(logging.DEBUG, logger="workflow_controller.driver.claude_cli"):
+        _log_stderr_line(b"Reading additional input from stdin...\n", lines, error_lines)
+        _log_stderr_line(b"[cpx-cli] launching: claude\n", lines, error_lines)
+        _log_stderr_line(b"plain continuation\n", lines, error_lines)
+        _log_stderr_line(b"[cpx-cli] ERROR: launch failed\n", lines, error_lines)
+        _log_stderr_line(
+            b"2026-11-17T00:00:00Z ERROR claude: boom\n" + b"x" * 400,
+            lines,
+            error_lines,
+        )
+        for i in range(25):
+            _log_stderr_line(f"normal {i}\n".encode(), lines, error_lines)
+
+    assert [record.levelno for record in caplog.records[:4]] == [
+        logging.DEBUG,
+        logging.DEBUG,
+        logging.DEBUG,
+        logging.ERROR,
+    ]
+    assert [record.levelno for record in caplog.records[4:5]] == [
+        logging.ERROR,
+    ]
+    assert len(lines) == 20
+    assert list(error_lines) == [
+        "[cpx-cli] ERROR: launch failed",
+        ("2026-11-17T00:00:00Z ERROR claude: boom\n" + "x" * 400)[:300],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_nonzero_exit_prefers_stderr_error_tail(tmp_path, monkeypatch):
+    """多条 ERROR 时取最新致命错误，普通噪声不挤出错误行。"""
+    driver = ClaudeCLIDriver()
+    stderr_chunks = [b"2026-11-17T00:00:00Z ERROR claude: early boom\n"]
+    stderr_chunks += [f"normal {i}\n".encode() for i in range(25)]
+    stderr_chunks.append(b"2026-11-17T00:00:02Z ERROR claude: fatal boom\n")
+
+    class FakeProc:
+        returncode = 1
+
+        def __init__(self):
+            self.stdin = self
+            self.stdout = _ChunkedFakeStream([])
+            self.stderr = _ChunkedFakeStream(stderr_chunks)
+
+        @staticmethod
+        def close():
+            pass
+
+        async def wait(self):
+            return 1
+
+    async def fake_spawn(*args, **kwargs):
+        return FakeProc()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_spawn)
+    with pytest.raises(ClaudeCLIExitError, match="fatal boom"):
+        [event async for event in driver.query("prompt", session_id="sid", cwd=str(tmp_path))]
 
 
 class TestPermissionMode:

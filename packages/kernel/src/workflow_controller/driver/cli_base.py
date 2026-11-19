@@ -25,6 +25,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
 import signal
 import weakref
 from typing import TYPE_CHECKING, NamedTuple
@@ -40,6 +41,23 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _STDOUT_CHUNK_SIZE = 65536
+# 显式错误标记的匹配示例：
+# - 行首或空白后的 `ERROR`，后接空格/冒号/等号：`ERROR failed`、`ERROR: failed`、`ERROR=failed`
+# - 行首或单个前缀词后的 `Error:` / `error:`：`Error: failed`、`error: failed`、`2026-... Error: failed`
+# - 行首或空白后的 `[ERROR]`：`[ERROR] failed`
+# - 行首或空白后的 `level=ERROR`：`level=ERROR failed`
+# 待完善：CLI 或 wrapper 新增显式错误标记时，同步补充此正则与单测。
+_STDERR_ERROR_RE = re.compile(
+    r"(?:^|\s)ERROR(?:\s|:|=)"
+    r"|^(?:\S+\s+)?(?:Error|error):"
+    r"|(?:^|\s)\[ERROR\]"
+    r"|(?:^|\s)level=ERROR(?:\s|$)"
+)
+
+
+def is_stderr_error_line(line: str) -> bool:
+    """识别 CLI stderr 的显式错误标记行，避免把正文普通 error 词误判。"""
+    return _STDERR_ERROR_RE.search(line) is not None
 
 
 class QueryOptions(NamedTuple):
