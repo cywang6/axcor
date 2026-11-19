@@ -31,7 +31,12 @@ jobs:
       - name: 各发行包独立构建
         run: |
           uv build --package workflow-controller-kernel
+          uv build --package workflow-controller-plugin-agent-traceback
+          uv build --package workflow-controller-plugin-breather
           uv build --package workflow-controller-plugin-fake-driver
+          uv build --package workflow-controller-plugin-file-provenance
+          uv build --package workflow-controller-plugin-graph
+          uv build --package workflow-controller-plugin-staged-pipeline
           uv build --package workflow-controller-hookserver
 
   npm:
@@ -42,6 +47,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -49,7 +58,12 @@ jobs:
       - name: 安装锁定依赖
         run: npm ci
 
+      - name: 安装 Python 侧插件包
+        working-directory: .
+        run: uv sync --locked
+
       - name: 类型检查
         run: npm run typecheck
 
-      # npm test 依赖 file_provenance 插件包（Python 侧），随其成包后启用
+      - name: 测试
+        run: npm test

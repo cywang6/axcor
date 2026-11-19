@@ -23,7 +23,12 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "workflow-controller-plugin-agent-traceback",
+    "workflow-controller-plugin-breather",
     "workflow-controller-plugin-fake-driver",
+    "workflow-controller-plugin-file-provenance",
+    "workflow-controller-plugin-graph",
+    "workflow-controller-plugin-staged-pipeline",
     "import-linter>=2.13,<3",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
@@ -40,13 +45,23 @@ package = false
 
 [tool.uv.sources]
 workflow-controller-kernel = { workspace = true }
+workflow-controller-plugin-agent-traceback = { workspace = true }
+workflow-controller-plugin-breather = { workspace = true }
 workflow-controller-plugin-fake-driver = { workspace = true }
+workflow-controller-plugin-file-provenance = { workspace = true }
+workflow-controller-plugin-graph = { workspace = true }
+workflow-controller-plugin-staged-pipeline = { workspace = true }
 
 [tool.uv.workspace]
 members = [
     "packages/kernel",
     "packages/hookserver",
+    "packages/plugins/agent-traceback",
+    "packages/plugins/breather",
     "packages/plugins/fake-driver",
+    "packages/plugins/file-provenance",
+    "packages/plugins/graph",
+    "packages/plugins/staged-pipeline",
 ]
 
 [tool.ruff]
@@ -78,6 +93,8 @@ ignore-words-list = "CANN,cann,NEmpty,deriver,NAM"
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "packages"]
+# 插件包测试目录同名 tests/：按命名空间包推导模块名，避免与仓根 tests 包互撞
+consider_namespace_packages = true
 norecursedirs = ["node_modules", "dist", "build", "*.egg-info"]
 asyncio_mode = "auto"
 markers = [

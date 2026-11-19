@@ -5,7 +5,7 @@ axcor（Agent eXecution Core Orchestration Runtime）是 Workflow Controller 的
 | 发行包 | 内容 |
 |---|---|
 | `workflow-controller-kernel` | 内核：headless runner、Run 记账、事件账本、Session 生命周期、预算与门禁强制、插件 SDK、稳定控制 API |
-| `workflow-controller-plugin-<name>` | 内置插件（当前随仓：`fake-driver`，headless 验收驱动；其余内置插件逐包迁入） |
+| `workflow-controller-plugin-<name>` | 内置插件：`agent-traceback`（检查点回放）、`breather`（会话交接）、`fake-driver`（headless 验收驱动）、`file-provenance`（文件归因）、`graph`（graph-yaml@1 驱动与 DAG 面板）、`staged-pipeline`（阶段门禁） |
 | `workflow-controller-hookserver` | 独立 Claude Code / opencode hook server |
 | `@workflow-controller/file-provenance`（npm） | OpenCode 宿主的文件归因插件 |
 
@@ -69,7 +69,7 @@ packages/
 ├── kernel/                  # 内核源码与 kernel_tests/
 ├── hookserver/              # 独立 hook server 子包
 ├── opencode-file-provenance/  # npm 子包（OpenCode 宿主集成）
-└── plugins/fake-driver/     # 插件包：src + tests + pyproject（entry point 声明）
+└── plugins/<name>/          # 插件包：src + tests + pyproject（entry point 声明）
 tests/                       # 跨包架构门禁（architecture）与共享测试基建（support）
 examples/  conf/  docs/
 ```
