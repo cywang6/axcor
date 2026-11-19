@@ -1601,7 +1601,7 @@ class AuthRotator:
                 and reviewer.status == ValidationStatus.VALID
             ):
                 self._probe_cache[fingerprint] = (worker, reviewer)
-        return {
+        payload = {
             "success": (
                 worker.status == ValidationStatus.VALID or reviewer.status == ValidationStatus.VALID
             ),
@@ -1615,6 +1615,9 @@ class AuthRotator:
             "provider_kind": provider.provider_kind,
             "error": worker.error,
         }
+        # 未设置的可选字段（非 codex/opencode 时为 None）不返回 key：typed 响应的
+        # exclude_unset 才能真正省略；能力项内部的显式 null（如 checked_at）仍保留。
+        return {key: value for key, value in payload.items() if value is not None}
 
     async def _catalog_invalid_payload(
         self,
@@ -1641,7 +1644,7 @@ class AuthRotator:
             checked_at=reviewer.checked_at,
             error=catalog_error,
         )
-        return {
+        payload = {
             "success": reviewer.status == ValidationStatus.VALID,
             "runtime": effective_runtime,
             "catalog_status": catalog_status,
@@ -1651,6 +1654,7 @@ class AuthRotator:
             "provider_kind": provider.provider_kind,
             "error": catalog_error,
         }
+        return {key: value for key, value in payload.items() if value is not None}
 
     def _apply_candidate_result(
         self,

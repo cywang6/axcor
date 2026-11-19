@@ -274,6 +274,23 @@ async def test_worker_probe_disables_claude_workspace_trust_pre_write(
 
 
 @pytest.mark.asyncio
+async def test_probe_payload_omits_none_optional_keys(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """非 codex/opencode 候选：catalog/kind 可选字段为 None 时不返回 key，
+    供 typed 响应（exclude_unset）真正省略这些字段。"""
+    _counting_probe_env(monkeypatch)
+    result = await _rotator(tmp_path).validate_candidate("sk", "m", "", "claude_sdk")
+
+    assert "catalog_status" not in result
+    assert "model_catalog_name" not in result
+    assert "model_catalog_path" not in result
+    assert "provider_kind" not in result
+    assert result["worker"]["status"] == "valid"
+
+
+@pytest.mark.asyncio
 async def test_codex_worker_probe_waits_for_iteration_end(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
