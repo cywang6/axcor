@@ -350,6 +350,22 @@ class PluginRegistry:
         self._user_config_dir = value
 
     @staticmethod
+    def _plugin_package_dir(plugin_cls: type[Plugin]) -> Path | None:
+        """插件类所在包的源码目录；定位不到（frozen/动态生成）返回 None。
+
+        用 import_module 而非查 sys.modules：对调用方不预设「模块已随
+        ep.load() 导入」的顺序，尚未导入时按需补导入（幂等）。
+        """
+        try:
+            module = importlib.import_module(plugin_cls.__module__)
+        except Exception:
+            return None
+        module_file = getattr(module, "__file__", None)
+        if not module_file:
+            return None
+        return Path(module_file).resolve().parent
+
+    @staticmethod
     def _entry_points() -> list[importlib.metadata.EntryPoint]:
         """已安装发行包登记的 workflow_controller.plugins 入口点（环境元数据坏掉当没有）。"""
         try:
@@ -386,13 +402,23 @@ class PluginRegistry:
             return {}
         return data if isinstance(data, dict) else {}
 
-    def _inherit_legacy_config(self, name: str, user_path: Path) -> dict[str, Any]:
+    def _inherit_legacy_config(
+        self, name: str, user_path: Path, plugin_cls: type[Plugin]
+    ) -> dict[str, Any]:
         """旧布局配置一次性迁移：把本地 plugins/<name>/config.yaml 的启停与
         自定义字段固化到用户配置文件，旧文件后续清理不丢配置。
+
+        插件包随发行安装后，plugins/<name>/ 即插件类所在包目录，其
+        config.yaml 是包内默认而非用户旧配置，不作为迁移源（否则默认值
+        会被固化成用户覆盖，升级后的新默认不再生效）。
         """
-        legacy_data = self._read_yaml_dict(self._plugins_dir / name / "config.yaml")
-        if not legacy_data:
+        legacy_file = self._plugins_dir / name / "config.yaml"
+        if not legacy_file.is_file():
             return {}
+        package_dir = self._plugin_package_dir(plugin_cls)
+        if package_dir is not None and package_dir == legacy_file.resolve().parent:
+            return {}
+        legacy_data = self._read_yaml_dict(legacy_file)
         payload = {k: v for k, v in legacy_data.items() if k not in ("name", "version")}
         if payload:
             try:
@@ -421,7 +447,7 @@ class PluginRegistry:
         if user_path.is_file():
             override = self._read_yaml_dict(user_path)
         else:
-            override = self._inherit_legacy_config(ep.name, user_path)
+            override = self._inherit_legacy_config(ep.name, user_path, plugin_cls)
         merged.update(override)
         extra = {k: v for k, v in merged.items() if k not in ("name", "version", "enabled")}
         return (
@@ -560,6 +586,12 @@ class PluginRegistry:
     def discover(self) -> list[tuple[PluginConfig, Path | None, type[Plugin]]]:
         found: list[tuple[PluginConfig, Path | None, type[Plugin]]] = []
         local_names: set[str] = set()
+        # 只枚举一次入口点：本地扫描的 shadow 判断与下方装载循环必须看到
+        # 同一份清单，两次独立枚举在安装元数据变动间隙可能不一致。
+        eps = self._entry_points()
+        ep_by_name: dict[str, importlib.metadata.EntryPoint] = {}
+        for ep in eps:
+            ep_by_name.setdefault(ep.name, ep)
         if self._plugins_dir.is_dir():
             for sub in sorted(self._plugins_dir.iterdir()):
                 if not sub.is_dir() or sub.name.startswith("_") or sub.name.startswith("."):
@@ -569,13 +601,24 @@ class PluginRegistry:
                     continue
                 config_file = sub / "config.yaml"
                 cfg = self._load_config(config_file)
+                # 插件发行包把各插件装进共享的 plugins 命名空间目录，本地扫描
+                # 会撞见入口点装进来的同一实现；此时走入口点通道发现，保留
+                # 包内默认与用户覆盖合并语义，仅真正的开发期本地副本才覆盖。
+                shadow_ep = ep_by_name.get(cfg.name)
+                if shadow_ep is not None:
+                    shadow_cls = self._load_entry_point_class(shadow_ep)
+                    shadow_dir = (
+                        self._plugin_package_dir(shadow_cls) if shadow_cls is not None else None
+                    )
+                    if shadow_dir is not None and shadow_dir == sub.resolve():
+                        continue
                 plugin_cls = self._load_plugin_class(plugin_file, sub)
                 if plugin_cls is not None:
                     found.append((cfg, config_file, plugin_cls))
                     local_names.add(cfg.name)
 
         ep_names: set[str] = set()
-        for ep in self._entry_points():
+        for ep in eps:
             if ep.name in local_names:
                 logger.warning(
                     "entry point plugin %s shadowed by local plugins/ directory", ep.name

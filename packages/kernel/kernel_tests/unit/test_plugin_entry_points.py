@@ -79,10 +79,15 @@ def _make_local(tmp_path: Path, name: str) -> None:
     )
 
 
-def _install_plugin_package(tmp_path: Path, monkeypatch: Any, config_yaml: str) -> type[Plugin]:
-    """落一个可导入的临时插件包（含 config.yaml），返回其中的插件类。"""
+def _install_plugin_package(
+    tmp_path: Path, monkeypatch: Any, config_yaml: str, pkg_name: str = "ep_demo_pkg"
+) -> type[Plugin]:
+    """落一个可导入的临时插件包（含 config.yaml），返回其中的插件类。
+
+    同名包会命中 sys.modules 缓存，多个用例共存的场景须传各自不同的包名。
+    """
     site = tmp_path / "site"
-    pkg = site / "ep_demo_pkg"
+    pkg = site / pkg_name
     pkg.mkdir(parents=True)
     (pkg / "__init__.py").write_text("", encoding="utf-8")
     (pkg / "config.yaml").write_text(config_yaml, encoding="utf-8")
@@ -94,9 +99,8 @@ def _install_plugin_package(tmp_path: Path, monkeypatch: Any, config_yaml: str) 
         encoding="utf-8",
     )
     monkeypatch.syspath_prepend(site)
-    from ep_demo_pkg.plugin import PackagedPlugin
-
-    return PackagedPlugin
+    plugin_module = importlib.import_module(f"{pkg_name}.plugin")
+    return plugin_module.PackagedPlugin
 
 
 def test_package_defaults_and_dist_version(tmp_path: Path, monkeypatch: Any) -> None:
@@ -177,6 +181,44 @@ def test_local_directory_shadows_entry_point(tmp_path: Path, monkeypatch: Any) -
         plugins_dir=tmp_path / "plugins", user_config_dir=tmp_path / "user-config"
     ).discover()
     assert [(cfg.name, cls) for cfg, _, cls in found] == [("ep-demo", _LocalPlugin)]
+
+
+def test_installed_plugin_dir_discovered_via_entry_point(tmp_path: Path, monkeypatch: Any) -> None:
+    """插件发行包装进 plugins 命名空间目录后，按入口点通道发现，用户覆盖生效。"""
+    plugin_cls = _install_plugin_package(
+        tmp_path, monkeypatch, "name: shadow_pkg\nenabled: true\n", pkg_name="shadow_pkg"
+    )
+    user_cfg = tmp_path / "user-config" / "shadow_pkg" / "config.yaml"
+    user_cfg.parent.mkdir(parents=True)
+    user_cfg.write_text("enabled: false\n", encoding="utf-8")
+    _only_eps(monkeypatch, _FakeEP("shadow_pkg", plugin_cls, version="1.2.3"))
+    registry = PluginRegistry(
+        plugins_dir=tmp_path / "site", user_config_dir=tmp_path / "user-config"
+    )
+
+    found = registry.discover()
+
+    assert [(cfg.name, cfg.enabled, cfg.version, cls) for cfg, _, cls in found] == [
+        ("shadow_pkg", False, "1.2.3", plugin_cls)
+    ]
+
+
+def test_installed_package_config_not_persisted_as_override(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """安装包自带的 config.yaml 不作为旧布局迁移源，不固化成用户覆盖。"""
+    plugin_cls = _install_plugin_package(
+        tmp_path, monkeypatch, "name: inherit_pkg\nenabled: true\n", pkg_name="inherit_pkg"
+    )
+    _only_eps(monkeypatch, _FakeEP("inherit_pkg", plugin_cls))
+    registry = PluginRegistry(
+        plugins_dir=tmp_path / "site", user_config_dir=tmp_path / "user-config"
+    )
+
+    (cfg, cfg_path, _) = registry.discover()[0]
+
+    assert (cfg.name, cfg.enabled) == ("inherit_pkg", True)
+    assert not cfg_path.exists()
 
 
 def test_duplicate_entry_point_names_first_wins(tmp_path: Path, monkeypatch: Any) -> None:

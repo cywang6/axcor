@@ -49,7 +49,7 @@ worker 读 `sample-project/README.md` 的任务说明，按五阶段推进，产
 
 > 门禁只在 **iteration 边界**生效：单次 agent-loop 内的跳步要等下一轮边界才发现。
 > 想看「跳步→block→补全→放行」的确定性证明，跑
-> `pytest tests/workflow_controller_core/unit/test_stages.py tests/workflow_controller_core/unit/test_staged_pipeline_plugin.py -q`（不耗 LLM）。
+> `pytest tests/workflow_controller_core/unit/run_plane/test_stages.py tests/plugins/staged_pipeline/test_gates.py -q`（不耗 LLM）。
 
 ## 目录
 
