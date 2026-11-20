@@ -33,6 +33,7 @@ from tests.architecture.layout import (
     ROOT,
     builtin_plugin_py_files,
     kernel_package_root,
+    normalized_source_exists,
     normalized_virtual_path,
     source_roots,
 )
@@ -172,11 +173,14 @@ def test_kernel_domain_vocabulary_matches_exact_whitelist() -> None:
         if count:
             hits[key] = count
 
-    # 插件路径白名单条目仅在插件入扫描面（workspace 布局）时参与互锁
+    # 插件路径白名单条目仅在插件入扫描面（workspace 布局）且源文件在本布局
+    # 在场时参与互锁（导出子集缺该插件时条目免检）
+    plugin_face_active = len(source_roots()) > 1
     active_whitelist = {
         key: allowed
         for key, allowed in DOMAIN_TERM_WHITELIST.items()
-        if len(source_roots()) > 1 or not key.startswith(_PLUGIN_WHITELIST_PREFIX)
+        if (plugin_face_active or not key.startswith(_PLUGIN_WHITELIST_PREFIX))
+        and normalized_source_exists(key)
     }
     drifted = sorted(set(hits) | set(active_whitelist))
     details = [

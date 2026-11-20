@@ -71,8 +71,8 @@ def web_routes_root() -> Path | None:
     return None
 
 
-def hookserver_package_root() -> Path:
-    """hookserver 包根（单仓与 workspace 布局路径不同）。"""
+def hookserver_package_root() -> Path | None:
+    """hookserver 包根；不在本仓的布局（如导出子集）返回 None。"""
     for candidate in (
         ROOT
         / "packages"
@@ -83,7 +83,7 @@ def hookserver_package_root() -> Path:
     ):
         if candidate.is_dir():
             return candidate
-    raise FileNotFoundError("hookserver 包根未找到")
+    return None
 
 
 def builtin_plugin_py_files() -> Iterator[Path]:

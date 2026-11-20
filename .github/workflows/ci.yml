@@ -39,6 +39,50 @@ jobs:
           uv build --package workflow-controller-plugin-staged-pipeline
           uv build --package workflow-controller-hookserver
 
+  kernel-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: 构建内核与验收驱动 wheel
+        run: |
+          uv build --package workflow-controller-kernel --wheel --out-dir dist
+          uv build --package workflow-controller-plugin-fake-driver --wheel --out-dir dist
+
+      - name: 干净环境安装 wheel
+        run: |
+          uv venv "$RUNNER_TEMP/kernel-only"
+          uv pip install --python "$RUNNER_TEMP/kernel-only/bin/python" dist/*.whl
+
+      - name: headless fake run 冒烟
+        run: $RUNNER_TEMP/kernel-only/bin/python scripts/fake_run_smoke.py
+
+  subset:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: [agent-traceback, breather, file-provenance, graph, staged-pipeline]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: 导出 kernel+单插件子集
+        run: python3 scripts/export_subset.py --output "$RUNNER_TEMP/subset" --plugin "${{ matrix.plugin }}"
+
+      - name: 子集自治测试
+        working-directory: ${{ runner.temp }}/subset
+        run: |
+          uv sync
+          uv run pytest -q
+
   npm:
     runs-on: ubuntu-latest
     defaults:

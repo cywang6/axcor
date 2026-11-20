@@ -62,6 +62,17 @@ asyncio.run(main())
 
 运行手册见 [HEADLESS.md](HEADLESS.md)。安装插件即自动发现（entry point + 包内默认 `config.yaml`，用户可写覆盖住 `<用户配置根>/plugins/<name>/config.yaml`）。
 
+## 子集导出
+
+按插件清单导出「内核 + 指定插件」的自治子集（拷贝即用，测试随包）：
+
+```bash
+uv run python scripts/export_subset.py --output /tmp/subset --plugin breather --plugin graph
+cd /tmp/subset && uv sync && uv run pytest -q
+```
+
+不指定 `--plugin` 时仅导出内核与验收驱动；hookserver 与 npm 子包不入子集。导出会同步裁剪 workspace 成员、path 依赖与 lock，并生成记录来源提交的 README。
+
 ## 仓库布局
 
 ```text

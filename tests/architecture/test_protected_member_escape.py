@@ -59,11 +59,14 @@ BASELINE: set[tuple[str, str]] = {
 
 
 def _scan_roots() -> list[tuple[Path, str]]:
-    """(扫描根, 基线键前缀)：内核与 hookserver 无前缀，workspace 插件包带 plugins/ 前缀。"""
-    roots = [
-        (kernel_package_root(), ""),
-        (hookserver_package_root(), ""),
-    ]
+    """(扫描根, 基线键前缀)：内核与 hookserver 无前缀，插件包带 plugins/ 前缀。
+
+    hookserver 缺席的布局（导出子集不含该包）跳过对应扫描根。
+    """
+    roots = [(kernel_package_root(), "")]
+    hookserver_root = hookserver_package_root()
+    if hookserver_root is not None:
+        roots.append((hookserver_root, ""))
     for source_root in source_roots()[1:]:
         plugins_dir = source_root / "workflow_controller" / "plugins"
         if plugins_dir.is_dir():
