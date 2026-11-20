@@ -132,9 +132,12 @@ def validate_trimmed_pyproject(
 
 def write_readme(target: Path, selected: list[str]) -> None:
     """写子集自说明 README：来源提交、插件清单与用法。"""
-    source_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True
-    ).stdout.strip()
+    try:
+        source_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise ExportError(f"读取来源提交失败（须在 git 仓内导出）：{error}") from error
     plugin_lines = "\n".join(f"- `{DIST_PREFIX}{name}`" for name in selected) or "（无）"
     content = f"""# Workflow Controller 内核子集
 
@@ -187,7 +190,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.output.exists() and any(args.output.iterdir()):
         print(f"目标目录非空：{args.output}", file=sys.stderr)
         return 2
-    args.output.mkdir(parents=True)
+    args.output.mkdir(parents=True, exist_ok=True)
 
     members = resolve_members(selected)
     try:
