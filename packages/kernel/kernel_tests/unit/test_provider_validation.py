@@ -469,6 +469,71 @@ async def test_codex_catalog_preflight_runs_off_event_loop_thread(
 
 
 @pytest.mark.asyncio
+async def test_codex_gateway_model_conversion_failure_reaches_validation_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from workflow_controller.driver.codex_cli import _codex_line_to_events
+
+    class GatewayUnsupportedDriver:
+        async def query(self, prompt: str, **kwargs):
+            line = json.dumps(
+                {
+                    "type": "turn.failed",
+                    "error": {
+                        "message": (
+                            '{"error":{"message":"not implemented",'
+                            '"type":"new_api_error","code":"convert_request_failed"}}'
+                        )
+                    },
+                }
+            )
+            for event in _codex_line_to_events(line, "probe", 0):
+                yield event
+
+        async def stop(self) -> None:
+            return None
+
+        async def kill(self) -> None:
+            return None
+
+    catalog = tmp_path / "codex-models.json"
+    catalog.write_text('{"models":[{"slug":"claude-opus-5-5"}]}', encoding="utf-8")
+
+    async def resolve_catalog(**_kwargs):
+        return "preset", str(catalog), "YibuAPI Claude Opus"
+
+    monkeypatch.setattr(
+        "workflow_controller.core.auth_rotator._resolve_codex_catalog_entry",
+        resolve_catalog,
+    )
+    monkeypatch.setattr(
+        "workflow_controller.driver.factory.create_driver",
+        lambda runtime, **kwargs: GatewayUnsupportedDriver(),
+    )
+
+    async def reviewer_ok(self, prompt: str, **kwargs):
+        return HttpResult(text="OK", is_error=False, error="")
+
+    monkeypatch.setattr(AnthropicHttpClient, "request", reviewer_ok)
+
+    result = await _rotator(tmp_path).validate_candidate(
+        "sk-test",
+        "claude-opus-5-5",
+        "https://yibuapi.com",
+        "codex_cli",
+        force=True,
+    )
+
+    assert result["success"] is True
+    assert result["worker"]["status"] == "invalid"
+    assert result["worker"]["error"] == (
+        "gateway does not support this model with OpenAI Responses format"
+    )
+    assert result["reviewer"]["status"] == "valid"
+
+
+@pytest.mark.asyncio
 async def test_codex_candidate_does_not_use_global_default_url(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -604,6 +669,7 @@ async def test_reviewer_probe_tests_all_thinking_modes(
 ) -> None:
     modes: list[str] = []
     enabled_budgets: list[int] = []
+    requests: list[dict[str, object]] = []
 
     def fake_create(runtime, **kwargs):
         return _ProbeDriver({})
@@ -611,6 +677,7 @@ async def test_reviewer_probe_tests_all_thinking_modes(
     async def fake_http(self, prompt, **kwargs):
         mode = str(kwargs.get("thinking_type"))
         modes.append(mode)
+        requests.append(kwargs)
         if mode == "enabled":
             enabled_budgets.append(int(kwargs.get("thinking_budget_tokens", 0)))
         if mode in ("disabled", "enabled", "adaptive"):
@@ -631,6 +698,7 @@ async def test_reviewer_probe_tests_all_thinking_modes(
     assert result["success"] is True
     assert modes == ["disabled", "enabled", "adaptive", "omitted"]
     assert enabled_budgets == [2048]
+    assert all("temperature" not in request for request in requests)
     assert result["reviewer"]["thinking_mode"] == "omitted"
     assert result["reviewer"]["thinking_modes"] == ["omitted"]
 
@@ -895,7 +963,7 @@ async def test_worker_probe_timeout_is_invalid_and_cleans_up(
 
 
 @pytest.mark.asyncio
-async def test_set_keys_accepts_reviewer_failure_and_retries_failed_probe(
+async def test_set_keys_accepts_reviewer_failure_and_reuses_worker_capability(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -907,7 +975,7 @@ async def test_set_keys_accepts_reviewer_failure_and_retries_failed_probe(
     await rotator.set_keys_validated(keys)
 
     provider = rotator.get_provider(0)
-    assert calls == {"worker": 2, "reviewer": 8}
+    assert calls == {"worker": 1, "reviewer": 4}
     assert provider.worker_validation.status == ValidationStatus.VALID
     assert provider.reviewer_validation.status == ValidationStatus.INVALID
 
@@ -927,6 +995,64 @@ async def test_set_keys_reuses_validations_after_provider_reordering(
 
     assert calls == {"worker": 2, "reviewer": 8}
     assert [provider.key for provider in rotator.get_providers()] == ["sk-2", "sk-1"]
+
+
+@pytest.mark.asyncio
+async def test_set_keys_reuses_single_valid_capability_after_provider_reordering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """已有 Provider 只要一侧 VALID 且配置未变，保存整池时不重测。"""
+    calls = _counting_probe_env(monkeypatch, http_ok=False)
+    rotator = _rotator(tmp_path)
+    first = {"key": "sk-1", "model": "m1", "runtime": "claude_sdk"}
+    second = {"key": "sk-2", "model": "m2", "runtime": "claude_sdk"}
+
+    await rotator.set_keys_validated([first, second])
+    await rotator.set_keys_validated([second, first])
+
+    assert calls == {"worker": 2, "reviewer": 8}
+    assert [provider.key for provider in rotator.get_providers()] == ["sk-2", "sk-1"]
+    assert rotator.get_provider(1).reviewer_validation.status == ValidationStatus.INVALID
+
+
+@pytest.mark.asyncio
+async def test_set_keys_saves_failed_existing_provider_and_adds_new_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker_calls = 0
+    reviewer_calls = 0
+
+    def fake_create(runtime: str, **kwargs):
+        nonlocal worker_calls
+        worker_calls += 1
+        event_type = EventType.ERROR if worker_calls == 1 else EventType.STEP_FINISH
+        return _ProbeDriver({}, event_type)
+
+    async def fake_http(self, prompt: str, **kwargs):
+        nonlocal reviewer_calls
+        reviewer_calls += 1
+        if reviewer_calls <= 4:
+            return HttpResult(text="", is_error=True, error="HTTP 403")
+        return HttpResult(text="OK", is_error=False, error="")
+
+    monkeypatch.setattr("workflow_controller.driver.factory.create_driver", fake_create)
+    monkeypatch.setattr(AnthropicHttpClient, "request", fake_http)
+    rotator = _rotator(tmp_path)
+    failed = {"key": "sk-failed", "model": "m-failed", "runtime": "claude_sdk"}
+    added = {"key": "sk-new", "model": "m-new", "runtime": "claude_sdk"}
+    rotator.set_keys([failed])
+
+    await rotator.set_keys_validated([failed, added])
+
+    assert worker_calls == 2
+    assert reviewer_calls == 8
+    assert [provider.key for provider in rotator.get_providers()] == ["sk-failed", "sk-new"]
+    failed_provider = rotator.get_provider(0)
+    assert failed_provider.worker_validation.status == ValidationStatus.INVALID
+    assert failed_provider.reviewer_validation.status == ValidationStatus.INVALID
+    assert rotator.get_provider(1).worker_validation.status == ValidationStatus.VALID
 
 
 @pytest.mark.asyncio

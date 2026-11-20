@@ -507,7 +507,7 @@ class PluginRegistry:
         return None
 
     @staticmethod
-    def _build_plugin_context(orchestrator: Any, hook_server: HookServer) -> Any:
+    def _build_plugin_context(orchestrator: Any, hook_server: HookServer | None) -> Any:
         """装配插件上下文（初始加载与运行时加载共用）。"""
         from workflow_controller.plugin.context import PluginContext
 
@@ -635,7 +635,7 @@ class PluginRegistry:
 
         return found
 
-    def load(self, orchestrator: Any, hook_server: HookServer) -> None:
+    def load(self, orchestrator: Any, hook_server: HookServer | None) -> None:
         discovered = self.discover()
         ctx = self._build_plugin_context(orchestrator, hook_server)
         for cfg, cfg_path, plugin_cls in discovered:
@@ -650,7 +650,7 @@ class PluginRegistry:
             except Exception:
                 logger.exception("plugin %s failed to load", cfg.name)
 
-    def reload_plugin(self, name: str, orchestrator: Any, hook_server: HookServer) -> bool:
+    def reload_plugin(self, name: str, orchestrator: Any, hook_server: HookServer | None) -> bool:
         """Enable/disable a plugin at runtime without restart."""
         for i, p in enumerate(self._plugins):
             if p.config.name == name:

@@ -34,12 +34,25 @@ VERIFY_CONTINUE_PROMPT = (
 MAX_RETRY_CONTEXT_CHARS = 2000
 
 
-def build_node_prompt(node: dict, ctx: dict, extra_context: str = "") -> str:
-    """节点执行提示词：任务描述/目标（缺省回退 prompt）+ 附加上下文。"""
+def _prompt_header(ctx: dict, workflow_system_prompt: str) -> str:
+    lines = [f"${name}={ctx[name]}" for name in ("WORK_DIR", "USER_PROMPT") if ctx.get(name)]
+    if workflow_system_prompt:
+        lines.append(f"$SYSTEM_PROMPT={workflow_system_prompt}")
+    return "\n".join(lines)
+
+
+def build_node_prompt(
+    node: dict,
+    ctx: dict,
+    extra_context: str = "",
+    *,
+    workflow_system_prompt: str = "",
+) -> str:
+    """组装执行会话的任务提示。"""
     parts: list[str] = []
-    header = [f"${name}={ctx[name]}" for name in ("WORK_DIR", "USER_PROMPT") if ctx.get(name)]
+    header = _prompt_header(ctx, workflow_system_prompt)
     if header:
-        parts.append("\n".join(header))
+        parts.append(header)
     desc = node.get("task_description")
     if desc:
         parts.append(f"## 任务描述\n{render(desc, ctx)}")
@@ -50,13 +63,38 @@ def build_node_prompt(node: dict, ctx: dict, extra_context: str = "") -> str:
         parts.append(render(node.get("prompt", "完成任务。"), ctx))
     if extra_context:
         parts.append(extra_context)
+    if node.get("_orig_task_type") == "normal":
+        acceptance = node.get("acceptance") or {}
+        criteria = acceptance.get("verifier_prompt") or acceptance.get("script")
+        if acceptance.get("enabled") and criteria:
+            parts.append(f"## Acceptance\n{render(criteria, ctx)}")
     parts.append("\n完成后返回 DONE。")
     return "\n\n".join(parts)
 
 
-def build_verifier_prompt(acc: dict, ctx: dict) -> str:
-    """验收提示词（acceptance.verifier_prompt 渲染）。"""
-    return render(acc.get("verifier_prompt", "验收上述产物。通过即 PASS。"), ctx)
+def build_verifier_prompt(node: dict, ctx: dict, *, workflow_system_prompt: str = "") -> str:
+    """为 normal 节点补上 workflow-orchestrator 的验收上下文。"""
+    acc = node.get("acceptance") or {}
+    criteria = render(acc.get("verifier_prompt", "验收上述产物。通过即 PASS。"), ctx)
+    if node.get("_orig_task_type") != "normal":
+        if not workflow_system_prompt:
+            return criteria
+        return "\n\n".join([_prompt_header(ctx, workflow_system_prompt), criteria])
+
+    parts = []
+    header = _prompt_header(ctx, workflow_system_prompt)
+    if header:
+        parts.append(header)
+    title = render(node.get("title", ""), ctx)
+    parts.append(f"[{node.get('id', '')}] {title}".rstrip())
+    if goal := node.get("task_goal"):
+        parts.append(f"## Goal\n{render(goal, ctx)}")
+    if procedure := node.get("procedure"):
+        parts.append("## Procedure\n" + render("\n".join(procedure), ctx))
+    parts.append(f"## Acceptance\n{criteria}")
+    if out_of_scope := node.get("out_of_scope"):
+        parts.append("## Out-of-Scope\n" + render("\n".join(out_of_scope), ctx))
+    return "\n\n".join(parts)
 
 
 def build_retry_context(node: dict, ctx: dict, last_reason: str) -> str:

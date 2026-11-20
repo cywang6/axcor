@@ -1002,8 +1002,10 @@ class Orchestrator:
     # ── project-dir-keyed (pre-session) ──────────────────────────────────
 
     def reload_plugin(self, name: str) -> bool:
-        if self._hook_server is None:
-            return False
+        # 插件 reload 独立于 hook_server：hook_server 端口被占（如 18765 被
+        # 外部进程占用）时 _hook_server 为 None，但插件加载/卸载仍应生效，
+        # 否则 toggle 后 config.yaml 的 enabled 已变、内存插件状态却不变，
+        # 前端 tab 显隐（依赖 manifest 加载标志）与磁盘配置脱节。
         return self._plugin_registry.reload_plugin(name, self, self._hook_server)
 
     async def reload_plugins(self) -> None:
@@ -1622,7 +1624,7 @@ class Orchestrator:
         Block count is keyed by the CLI uuid (per-subprocess).
         """
         final_text = data.get("last_assistant_message") or ""
-        mig_session_id = self._cli_to_workflow_controller_session.get(session_id)
+        mig_session_id = await self._resolve_hook_session(session_id)
         if not mig_session_id:
             logger.warning(
                 "stop_hook: no Workflow Controller session for CLI uuid %s",

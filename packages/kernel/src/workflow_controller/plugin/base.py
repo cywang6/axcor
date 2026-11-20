@@ -237,7 +237,7 @@ class Plugin(ABC):
 
     def register_hook_routes(
         self,
-        hook_server: HookServer,
+        hook_server: HookServer | None,
         routes: list[tuple[str, str, Any]],
     ) -> None:
         """Register HTTP routes on the aiohttp HookServer (port 18765).
@@ -257,6 +257,12 @@ class Plugin(ABC):
         control-event wiring keeps working even if its HTTP hook routes
         can't be added.
         """
+        if hook_server is None:
+            logger.warning(
+                "register_hook_routes skipped — hook_server is None "
+                "(port busy / not started); routes not added",
+            )
+            return
         router = getattr(getattr(hook_server, "app", None), "router", None)
         if router is not None and getattr(router, "frozen", False):
             logger.warning(

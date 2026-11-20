@@ -1169,8 +1169,8 @@ class GraphDriver:
                     self._reset_node_for_rerun(nid, keep_attempts=True)
 
     def _apply_group_resume(self, world: RunWorld, actions: list[RunAction]) -> None:
-        """组恢复的复位：failed/skipped 从头重跑；stopped/running 按 world 对账
-        成员存续——可复用则续跑/重挂守护，消亡则重排重跑。
+        """组恢复的复位：failed/skipped 重跑但保留 attempt 计数（历史不覆盖）；
+        stopped/running 按 world 对账成员存续——可复用则续跑/重挂守护，消亡则重排重跑。
         """
         self._group_paused = False
         recovering = self._recovering
@@ -1183,7 +1183,10 @@ class GraphDriver:
                 continue
             status = info.get("status")
             if status in ("failed", "skipped"):
-                self._reset_node_for_rerun(nid)
+                # 续跑（reopen/resume）不重置 attempts：新一次执行拿到递增的
+                # attempt 号，node_history 事件按 (gen, attempt) 去重时不覆盖
+                # 之前失败的尝试记录。
+                self._reset_node_for_rerun(nid, keep_attempts=True)
             elif status == "stopped":
                 self._resume_stopped_node(
                     nid, self._nodes.get(nid), world, info, recovering, actions
@@ -1542,10 +1545,12 @@ class GraphDriver:
                 ctx,
                 self._last_verify_reason[node_id],
             )
-        prompt = prompts.build_node_prompt(node, ctx, retry_ctx)
-        if node.get("task_type") == "generator":
-            # 编排提示不带重试上下文：子图生成按当次验收反馈重新编排
-            prompt = prompts.build_node_prompt(node, ctx)
+        prompt = prompts.build_node_prompt(
+            node,
+            ctx,
+            "" if node.get("task_type") == "generator" else retry_ctx,
+            workflow_system_prompt=self._program.config.get("system_prompt", ""),
+        )
         actions.append(
             StartSession(
                 spec=self._member_spec(
@@ -1687,11 +1692,16 @@ class GraphDriver:
         }
         if acc.get("type", "script") == "agent":
             act.phase = _PHASE_VERIFY_SPAWN
+            act.verify = {"verify_type": "agent"}
             actions.append(
                 StartSession(
                     spec=self._member_spec(
                         name=f"graph:verify:{act.node_id}",
-                        prompt=prompts.build_verifier_prompt(acc, ctx),
+                        prompt=prompts.build_verifier_prompt(
+                            node,
+                            ctx,
+                            workflow_system_prompt=self._program.config.get("system_prompt", ""),
+                        ),
                         agent_name=acc.get("verifier", ""),
                         loop_max_iter=self._max_iterations or node.get("max_iterations", 10),
                         loop_evaluator=self._evaluator or "feedback",
@@ -1805,7 +1815,7 @@ class GraphDriver:
         self._last_verify_reason[act.node_id] = reason or "acceptance failed"
         rollback_to = acc.get("rollback_to", "") or ""
         verdict = gates.retry_or_exhaust(
-            act.attempt,
+            self._state.retries(act.node_id) + 1,
             int(acc.get("max_retries", 0) or 0),
             acc.get("on_exhaust", "stop"),
             rollback_to,
@@ -1829,6 +1839,7 @@ class GraphDriver:
         """按判定迁移节点：retry 重跑 / continue 跳过 / rollback 回退 / fail 终局。"""
         if verdict == "retry":
             # 重试：清 session id，下一轮全新执行；本轮终态成员一并回收
+            self._state.increment_retries(act.node_id)
             self._discard_finished_members(act, actions)
             self._state.clear_session_id(act.node_id)
             self._state.clear_failure_reason(act.node_id)
@@ -1907,6 +1918,7 @@ class GraphDriver:
             reset_act = self._nodes.pop(nid, None)
             if reset_act is not None:
                 self._cancel_timer(reset_act, actions)
+            self._last_verify_reason.pop(nid, None)
         self._emit_graph_event(
             actions,
             "node_rollback",
@@ -2169,11 +2181,19 @@ class GraphDriver:
         *,
         keep_attempts: bool = False,
     ) -> None:
-        """节点按全新执行重排；恢复中失效成员的已消耗次数仍需保留。"""
+        """节点按全新执行重排；恢复中失效成员的已消耗次数仍需保留。
+
+        ``attempts``（展示/历史计数）按 keep_attempts 决定是否保留；
+        ``retries``（本续跑周期的重试预算）无论是否保留 attempt 都清零，
+        让每次重跑拿到完整重试预算，同时上一次的失败原因随之失效（否则
+        重跑的首个 attempt 会误注入「第 N 次尝试」的重试上下文）。
+        """
         self._state.set_node_status(node_id, "pending")
         self._state.clear_failure_reason(node_id)
         self._state.clear_session_id(node_id)
         self._state.clear_verify_session_id(node_id)
+        self._state.reset_retries(node_id)
+        self._last_verify_reason.pop(node_id, None)
         if not keep_attempts:
             self._state.reset_attempts(node_id)
 

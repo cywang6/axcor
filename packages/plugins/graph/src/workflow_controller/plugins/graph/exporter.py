@@ -92,8 +92,15 @@ class _NodeAttempts:
             "workflow_controller_session_id"
         ):
             fact["workflow_controller_session_id"] = record["workflow_controller_session_id"]
-        if fact.get("status") is None and record.get("status") is not None:
-            fact["status"] = record["status"]
+        status = record.get("status")
+        # 与前端 projectionToRunIndex 同序：快照的 running/stopped 可覆盖事件的
+        # 非终态状态（暂停/停止的尝试在导出件中也显示为已停止），终态结论优先。
+        active_state = status in ("running", "stopped")
+        if status is not None and (
+            fact.get("status") is None
+            or (active_state and fact.get("status") not in _TERMINAL_STATUSES)
+        ):
+            fact["status"] = status
         if fact.get("verify") is None and record.get("verify_session_id"):
             fact["verify"] = {
                 "verify_type": "agent",
@@ -165,7 +172,7 @@ class _ContributionBuilder:
 
     @staticmethod
     def _execution_state(status: Any) -> str:
-        return "finished" if status in _TERMINAL_STATUSES else "in_progress"
+        return "finished" if status == "stopped" or status in _TERMINAL_STATUSES else "in_progress"
 
     @staticmethod
     def _depends_on_relation(
@@ -446,6 +453,7 @@ class _ContributionBuilder:
             "generation": gen,
             "attempt": attempt,
             "executionState": self._execution_state(status),
+            "nodeStatus": status,
         }
         if status == "passed":
             fields["attemptResult"] = "succeeded"
@@ -550,7 +558,15 @@ class _ContributionBuilder:
         members: _SortedMembers,
     ) -> str:
         status = fact.get("status")
-        verdict = "passed" if status == "passed" else "failed" if status == "failed" else "running"
+        verdict = (
+            "passed"
+            if status == "passed"
+            else "failed"
+            if status == "failed"
+            else "stopped"
+            if status == "stopped"
+            else "running"
+        )
         verification: dict[str, Any] = {
             "type": verify.get("verify_type") or "agent",
             "status": verdict,
@@ -726,7 +742,7 @@ class _ContributionBuilder:
     def _session_execution_state(self, sid: str, status: Any = None) -> str:
         outcome = self.session_outcomes.get(sid)
         if outcome:
-            return "finished" if outcome[0] in {"completed", "failed"} else "in_progress"
+            return "finished" if outcome[0] in {"completed", "failed", "stopped"} else "in_progress"
         row = self.request.roster.get(sid) or {}
         if row.get("loop_status") == "no" and row.get("stop_reason") in (
             COMPLETED_STOP_REASONS | FAILED_STOP_REASONS

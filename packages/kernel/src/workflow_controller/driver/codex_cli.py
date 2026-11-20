@@ -25,6 +25,7 @@ import re
 from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit, urlunsplit
 
 from workflow_controller.driver.cli_base import (
     CLIDriverBase,
@@ -81,9 +82,20 @@ _OPENAI_RESPONSES_PROTOCOL_MARKERS = (
     "body.tool_choice: input should be a valid dict",
     "missing `messages` parameter",
 )
+_GATEWAY_RESPONSES_MODEL_UNSUPPORTED_ERROR = (
+    "gateway does not support this model with OpenAI Responses format"
+)
 _AUTH_STATUS_RE = re.compile(r"\b(?:401|403)\b")
 _RATE_LIMIT_STATUS_RE = re.compile(r"\b429\b")
 GATE_TOOL_TIMEOUT_SECONDS = 24 * 60 * 60
+
+
+def _responses_base_url(base_url: str) -> str:
+    """Normalize a gateway root URL to Codex's versioned Responses root."""
+    parts = urlsplit(base_url)
+    if parts.path in {"", "/"}:
+        return urlunsplit((parts.scheme, parts.netloc, "/v1", parts.query, parts.fragment))
+    return base_url
 
 
 def _codex_config_overrides(
@@ -100,7 +112,7 @@ def _codex_config_overrides(
         "-c",
         f"model_providers.workflow_controller.name={json.dumps('Workflow Controller provider')}",
         "-c",
-        f"model_providers.workflow_controller.base_url={json.dumps(base_url)}",
+        f"model_providers.workflow_controller.base_url={json.dumps(_responses_base_url(base_url))}",
         "-c",
         'model_providers.workflow_controller.env_key="WORKFLOW_CONTROLLER_CODEX_API_KEY"',
         "-c",
@@ -906,6 +918,8 @@ def _error_events(error: str, session_id: str, iteration: int) -> list[Event]:
         return []
 
     lower_error = error.lower()
+    if "convert_request_failed" in lower_error or lower_error.strip() == "not implemented":
+        error = _GATEWAY_RESPONSES_MODEL_UNSUPPORTED_ERROR
     if any(marker in lower_error for marker in _OPENAI_RESPONSES_PROTOCOL_MARKERS):
         error = "response is not OpenAI Responses format"
     kind: Literal["auth_error", "rejected"]

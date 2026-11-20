@@ -24,7 +24,7 @@ import yaml
 
 from workflow_controller.core.runs import RunRecord
 from workflow_controller.plugin.run_export import RunExportRequest
-from workflow_controller.plugins.graph.exporter import build_contribution
+from workflow_controller.plugins.graph.exporter import _NodeAttempts, build_contribution
 
 RUN_ID = "r1"
 
@@ -270,7 +270,7 @@ def test_execution_state_uses_snapshot_status_when_history_is_missing(tmp_path) 
     for status, expected in (
         ("running", "in_progress"),
         ("passed", "finished"),
-        ("stopped", "in_progress"),
+        ("stopped", "finished"),
     ):
         snapshot = {
             "workflow": "demo",
@@ -284,7 +284,43 @@ def test_execution_state_uses_snapshot_status_when_history_is_missing(tmp_path) 
             ("check", 0, 1, "execute")
         ]
         assert member.fields["executionState"] == expected
+        assert member.fields["nodeStatus"] == status
         assert ("attemptResult" in member.fields) == (status == "passed")
+
+
+def test_stopped_attempt_maps_execution_and_verification(tmp_path) -> None:
+    """停止的尝试：executionState 收口为 finished，验收 status 为 stopped（对齐投影）。"""
+    program = _freeze_program(
+        tmp_path,
+        [
+            {"id": "step", "task_type": "agent"},
+        ],
+    )
+    events = [
+        _event(1, "step", 0, 1, "stopped", sid="exec", verify={"verify_type": "agent"}),
+        _outcome(2, "exec", "stopped"),
+    ]
+    keyed = _by_key(build_contribution(_request(program, events)).members)
+    exec_member = keyed[("step", 0, 1, "execute")]
+    verify_member = keyed[("step", 0, 1, "verify")]
+    assert exec_member.fields["executionState"] == "finished"
+    assert exec_member.fields["nodeStatus"] == "stopped"
+    assert verify_member.fields["executionState"] == "finished"
+    assert verify_member.fields["verification"] == {"type": "agent", "status": "stopped"}
+
+
+def test_note_record_overrides_non_terminal_event_status_with_running_stopped() -> None:
+    """快照 running/stopped 覆盖非终态事件状态（与前端 projectionToRunIndex 同序）。"""
+    attempts = _NodeAttempts()
+    attempts.note_event({"attempt": 1, "status": "running", "workflow_controller_session_id": "s1"})
+    attempts.note_record({"attempts": 1, "status": "stopped"})
+    assert attempts.facts[1]["status"] == "stopped"
+
+    # 终态事件结论优先，不被快照 running/stopped 覆盖
+    attempts = _NodeAttempts()
+    attempts.note_event({"attempt": 1, "status": "passed", "workflow_controller_session_id": "s1"})
+    attempts.note_record({"attempts": 1, "status": "stopped"})
+    assert attempts.facts[1]["status"] == "passed"
 
 
 def test_session_lifecycle_is_independent_of_node_status(tmp_path) -> None:

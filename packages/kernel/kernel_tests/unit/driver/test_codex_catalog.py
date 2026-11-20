@@ -98,7 +98,7 @@ def test_installs_deepseek_preset(tmp_path: Path, monkeypatch) -> None:
     }
 
 
-def test_installs_aihubmix_opus_preset(tmp_path: Path, monkeypatch) -> None:
+def test_installs_yibuapi_opus_preset(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         codex_catalog,
         "_bundled_model_slugs",
@@ -114,6 +114,8 @@ def test_installs_aihubmix_opus_preset(tmp_path: Path, monkeypatch) -> None:
     catalog = json.loads(result.model_catalog_path.read_text(encoding="utf-8"))
     model = catalog["models"][0]
     assert model["slug"] == "claude-opus-5-5"
+    assert model["base_instructions"] == ""
+    assert model["truncation_policy"] == {"mode": "bytes", "limit": 10000}
     assert model["context_window"] == 1048576
     assert model["input_modalities"] == ["text", "image"]
     assert model["supports_parallel_tool_calls"] is True

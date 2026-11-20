@@ -43,6 +43,7 @@ def default_node() -> dict[str, Any]:
     return {
         "status": "pending",
         "attempts": 0,
+        "retries": 0,
         "workflow_controller_session_id": None,
         "verify_session_id": None,
         "started_at": None,
@@ -184,6 +185,19 @@ class GraphState:
     def reset_attempts(self, node_id: str) -> None:
         self._set_node_field(node_id, "attempts", 0)
 
+    def retries(self, node_id: str) -> int:
+        """当前续跑周期内已消耗的重试次数（重试预算的展示计数无关账单）。"""
+        return self._data["nodes"][node_id].get("retries", 0)
+
+    def increment_retries(self, node_id: str) -> None:
+        with self._lock:
+            info = self._data["nodes"][node_id]
+            info["retries"] = info.get("retries", 0) + 1
+        self._checkpoint()
+
+    def reset_retries(self, node_id: str) -> None:
+        self._set_node_field(node_id, "retries", 0)
+
     def set_failure_reason(self, node_id: str, reason: str) -> None:
         self._set_node_field(
             node_id,
@@ -318,6 +332,7 @@ class GraphState:
             info["gen"] = new_gen
             info["status"] = "pending"
             info["attempts"] = 0
+            info["retries"] = 0
             info["workflow_controller_session_id"] = None
             info["verify_session_id"] = None
             info["failure_reason"] = None

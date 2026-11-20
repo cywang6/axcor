@@ -168,3 +168,14 @@ def test_rollback_reset_clears_both_session_ids():
     assert info["status"] == "pending"
     assert info["workflow_controller_session_id"] is None
     assert info["verify_session_id"] is None
+
+
+def test_rollback_reset_clears_retries_and_attempts():
+    """回滚重置清零重试预算与 attempt 计数，避免回滚后立即耗尽 max_retries。"""
+    st = GraphState("g1", "wf", {"A"})
+    st.increment_attempts("A")
+    st.increment_retries("A")
+    st.reset_rollback("A", 1)
+    info = st.snapshot()["nodes"]["A"]
+    assert info["attempts"] == 0
+    assert info["retries"] == 0

@@ -151,6 +151,7 @@ async def test_runner_passes_thinking_mode_to_http(
     )
     assert captured["thinking_type"] == "enabled"
     assert captured["thinking_budget_tokens"] == 4096
+    assert "temperature" not in captured
 
 
 @pytest.mark.asyncio

@@ -525,6 +525,7 @@ class TestRunPlaneSwitch:
         before = env.driver_of(run_id).state.snapshot()["nodes"]
         assert before["good"]["status"] == "passed"
         assert before["flaky"]["status"] == "failed"
+        assert before["flaky"]["attempts"] == 1
 
         reopened = await env.coord.restart_run(run_id)
         assert reopened.status == "running"
@@ -534,6 +535,8 @@ class TestRunPlaneSwitch:
         assert after["good"]["status"] == "passed"
         assert after["good"]["attempts"] == before["good"]["attempts"]
         assert after["flaky"]["status"] == "passed"
+        # 续跑保留 failed 节点的 attempt 计数：重跑为第 2 次尝试，历史不覆盖
+        assert after["flaky"]["attempts"] == before["flaky"]["attempts"] + 1
 
     async def test_failed_graph_resume_after_service_restart_uses_snapshot(
         self,

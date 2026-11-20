@@ -307,6 +307,42 @@ def test_detail_reconcile_only_stops_member_missing_from_pool(tmp_path: Path):
     assert "projection_updated" in types
 
 
+def test_orchestrator_yaml_fields_reach_the_correct_sessions(tmp_path: Path):
+    driver = build_driver(
+        tmp_path,
+        [
+            {
+                "id": "a",
+                "task_type": "normal",
+                "title": "Deliver the report",
+                "goal": ["REQUEST_PATH=/tmp/report.json"],
+                "approach": ["Write the report in sections"],
+                "acceptance": ["The report exists and is readable"],
+                "procedure": ["Run check-report /tmp/report.json"],
+                "out_of_scope": ["Do not edit the source data"],
+                "executor": "writer",
+                "verifier": "checker",
+            },
+        ],
+        system_prompt="Check the project reference when needed",
+    )
+    executor = first(decide(driver), StartSession).spec
+    decide(driver, [activation("exec-1", "node=a")])
+    verifier = first(decide(driver, [outcome("exec-1", "completed")]), StartSession).spec
+
+    for spec in (executor, verifier):
+        assert "$SYSTEM_PROMPT=Check the project reference when needed" in spec.prompt
+        assert "REQUEST_PATH=/tmp/report.json" in spec.prompt
+        assert "The report exists and is readable" in spec.prompt
+        assert "Do not edit the source data" in spec.prompt
+    assert executor.agent_name == "writer"
+    assert "Write the report in sections" in executor.prompt
+    assert "Run check-report" not in executor.prompt
+    assert verifier.agent_name == "checker"
+    assert "Run check-report /tmp/report.json" in verifier.prompt
+    assert "Write the report in sections" not in verifier.prompt
+
+
 def test_finished_node_discards_all_its_members(tmp_path: Path):
     driver = build_driver(
         tmp_path,
@@ -1220,6 +1256,26 @@ class TestAgentNode:
         assert driver.state.attempts("w") == 1
 
     @staticmethod
+    def test_resume_stopped_terminal_session_respawns(tmp_path):
+        # 暂停（pause）与停止（stop）语义不同：pause 后 member.state=IDLE 可复用
+        # （见 test_reuse_paused_session_resumes）；stop 后 member.state=STOPPED
+        # 是终态，续跑时不可复用，须新建成员。回归锚：用户 stop 掉成员后点
+        # 续跑，不应卡在「无 session 可复用」而静默，也不应复用已终态的 session。
+        driver = build_driver(tmp_path, [agent_node("w", acceptance={"enabled": False})])
+        driver.state.increment_attempts("w")
+        driver.state.set_node_status("w", "stopped", session_id="s9")
+        driver.on_control(_resumed_control())
+        actions = decide(
+            driver,
+            sessions=(member("s9", "stopped", "user_pause"),),
+        )
+        spawn = first(actions, StartSession)
+        assert spawn.context == "node=w"
+        assert not pick(actions, RestartSession)
+        # 终态复用失败时保留已消耗的 attempt 计数，新建成员计入下一次尝试
+        assert driver.state.attempts("w") == 2
+
+    @staticmethod
     def test_resume_uses_current_graph_model_without_new_member(monkeypatch, tmp_path):
         driver = build_driver(tmp_path, [agent_node("w", acceptance={"enabled": False})])
         monkeypatch.setattr(driver, "_model", "new-provider/new-model")
@@ -1586,6 +1642,17 @@ class TestRollbackAndPropagation:
         assert "tail#0" in snap["retired_instances"]
         assert first(actions, StartProcess).context == "node=init"
 
+    def test_rollback_resets_retries_budget(self, tmp_path):
+        """回滚路径清零重试预算：回滚前消耗过 retries 的节点回滚后不再立即耗尽。"""
+        driver = self._graph(tmp_path)
+        driver.state.increment_retries("tail")
+        assert driver.state.retries("tail") == 1
+        for pid, ctx in (("p1", "node=init"), ("p2", "node=mid"), ("p3", "node=tail")):
+            decide(driver)
+            decide(driver, [ProcessExit(proc_id=pid, context=ctx, returncode=0)])
+        decide(driver, [proc_exit("node=tail/verify", 1, proc_id="p4")])
+        assert driver.state.retries("tail") == 0
+
 
 # ── 子图（generator）──────────────────────────────────────────────
 
@@ -1751,10 +1818,31 @@ class TestGroupControlReaction:
         driver.on_control(_paused_control())
         driver.on_control(_resumed_control())
         actions = decide(driver)
-        # failed/skipped 节点复位 pending，attempts 清零从头重跑
+        # failed/skipped 节点复位 pending，attempts 保留（历史不覆盖），重跑为下一次尝试
         assert node_status(driver, "a") == "running"
-        assert driver.state.snapshot()["nodes"]["a"]["attempts"] == 1
+        assert driver.state.snapshot()["nodes"]["a"]["attempts"] == 2
         assert first(actions, StartProcess).context == "node=a"
+
+    @staticmethod
+    def test_resume_resets_retry_budget_not_just_attempts(tmp_path):
+        """续跑重置重试预算：上一轮耗尽的重试次数不继承到新一轮（attempts 仍保留）。"""
+        driver = build_driver(
+            tmp_path,
+            [
+                {"id": "a", "task_type": "bash", "command": "x", "acceptance": {"enabled": False}},
+                bash_node("b", "true", depends_on=["a"], acceptance={"enabled": False}),
+            ],
+        )
+        decide(driver)
+        decide(driver, [ProcessExit(proc_id="p1", context="node=a", returncode=1)])
+        decide(driver)  # 传播轮（b 标 skipped）
+        driver.state.increment_retries("a")  # 模拟上一轮已耗尽重试预算
+        assert driver.state.retries("a") == 1
+        driver.on_control(_paused_control())
+        driver.on_control(_resumed_control())
+        decide(driver)
+        assert driver.state.retries("a") == 0  # 预算重置
+        assert driver.state.attempts("a") == 2  # 展示计数保留
 
     @staticmethod
     def test_resume_reruns_running_bash_killed_during_pause(tmp_path):

@@ -356,7 +356,7 @@ class PluginServices:
 class PluginContext:
     bus: EventBus
     type_registry: EventTypeRegistry
-    hook_server: HookServer
+    hook_server: HookServer | None
     file_changes: FileChangeCapture | None = None
     # 启动期 Workflow Controller 的工作目录（供 plugin 不穿越 orchestrator.config 用，二审 #11）
     # 由 PluginRegistry.load 注入，默认 = Path.cwd()

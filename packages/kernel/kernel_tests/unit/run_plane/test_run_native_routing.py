@@ -18,13 +18,37 @@ from __future__ import annotations
 
 import asyncio
 
-from workflow_controller.config.settings import AppConfig, ReviewerConfig
+from workflow_controller.config.settings import AppConfig, ReviewerConfig, SessionConfig
 from workflow_controller.core.orchestrator import Orchestrator
 from workflow_controller.core.runs import RunKind
 from workflow_controller.session.events import Event, EventType
 
 
 class TestNativeHookRouting:
+    async def test_stop_hook_recovers_native_binding_after_restart(self, tmp_path, monkeypatch):
+        config = AppConfig(project_dir=str(tmp_path), reviewer=ReviewerConfig(enabled=False))
+        original = Orchestrator(config, default_project_dir=tmp_path)
+        worker = await original.pool.create(SessionConfig(name="worker", cwd=str(tmp_path)))
+        await original.affiliation.set_native_session_id(worker.id, "claude-uuid")
+
+        restored = Orchestrator(config, default_project_dir=tmp_path)
+        restored.pool.load_sessions()
+        await restored.affiliation.recover_at_boot(restored.pool)
+        assert not getattr(restored, "_cli_to_workflow_controller_session")
+        calls = []
+
+        async def decide_stop(session_id, final_text, *, block_key):
+            calls.append((session_id, final_text, block_key))
+            return {"decision": "block", "reason": "reviewer feedback"}
+
+        monkeypatch.setattr(restored, "_decide_stop", decide_stop)
+        result = await getattr(restored, "_handle_stop_request")(
+            "claude-uuid", {"last_assistant_message": "需要继续吗？"}
+        )
+
+        assert result == {"decision": "block", "reason": "reviewer feedback"}
+        assert calls == [(worker.id, "需要继续吗？", "claude-uuid")]
+
     async def test_native_rebinding_latest_holder_wins(self, tmp_path):
         orch = Orchestrator(
             AppConfig(project_dir=str(tmp_path), reviewer=ReviewerConfig(enabled=False)),

@@ -282,6 +282,25 @@ class TestCodexLineToEvents:
         assert events[0].data["error"] == "response is not OpenAI Responses format"
 
     @staticmethod
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "not implemented",
+            '{"error":{"message":"not implemented","code":"convert_request_failed"}}',
+        ],
+    )
+    def test_turn_failed_normalizes_gateway_model_conversion_not_implemented(message: str):
+        line = json.dumps({"type": "turn.failed", "error": {"message": message}})
+
+        events = _codex_line_to_events(line, "sid", 1)
+
+        assert [event.event_type for event in events] == [EventType.ERROR]
+        assert (
+            events[0].data["error"]
+            == "gateway does not support this model with OpenAI Responses format"
+        )
+
+    @staticmethod
     def test_hook_trust_warning_is_ignored():
         line = json.dumps(
             {
@@ -353,6 +372,18 @@ class TestCodexProcEnv:
             "-c",
             'model_providers.workflow_controller.wire_api="responses"',
         ]
+
+    @staticmethod
+    def test_gateway_root_base_url_gets_versioned_responses_path():
+        overrides = _codex_config_overrides("https://yibuapi.com")
+
+        assert 'model_providers.workflow_controller.base_url="https://yibuapi.com/v1"' in overrides
+
+        explicit = _codex_config_overrides("https://open.bigmodel.cn/api/v1")
+        assert (
+            'model_providers.workflow_controller.base_url="https://open.bigmodel.cn/api/v1"'
+            in explicit
+        )
 
     @staticmethod
     def test_missing_base_url_fails_closed(tmp_path, monkeypatch):

@@ -110,6 +110,69 @@ async def test_bash_and_verifier_read_prompt_env_and_restore_keeps_edits(
     assert prompt_file.read_text(encoding="utf-8") == "手工修改\n"
 
 
+async def test_workflow_status_points_to_source_yaml_and_current_prompt(tmp_path: Path) -> None:
+    env = GraphRunPlaneEnv(tmp_path)
+    program = env.write_workflow(
+        [{"id": "one", "task_type": "bash", "command": "test -s .workflow/status.json"}]
+    )
+    run_id = await env.start_graph_run(yaml_path=program, params={"starting_prompt": "开发 ABS"})
+    await await_run_status(env, run_id, {"completed"})
+
+    work_dir = tmp_path / "wd"
+    status_file = work_dir / ".workflow" / "status.json"
+    prompt_file = work_dir / ".workflow" / run_id / "user_prompt.md"
+    expected = {
+        "workflow": str(program),
+        "work_dir": str(work_dir),
+        "user_prompt": str(prompt_file),
+    }
+    assert json.loads(status_file.read_text(encoding="utf-8")) == expected
+    assert prompt_file.read_text(encoding="utf-8") == "开发 ABS\n"
+
+    snapshot = await env.coord.load_driver_snapshot(run_id)
+    run = await env.coord.get_run(run_id)
+    status_file.unlink()
+    getattr(env.plugin, "_drivers").clear()
+    env.plugin.restore_driver(run, snapshot)
+    assert json.loads(status_file.read_text(encoding="utf-8")) == expected
+
+
+async def test_workflow_status_preserves_existing_orchestrator_state(tmp_path: Path) -> None:
+    env = GraphRunPlaneEnv(tmp_path)
+    program = env.write_workflow(
+        [{"id": "one", "task_type": "bash", "command": "test -s .workflow/status.json"}]
+    )
+    status_file = tmp_path / "wd" / ".workflow" / "status.json"
+    status_file.parent.mkdir(parents=True)
+    existing = '{"workflow": "/other/workflow.yaml", "tasks": {"one": {"status": "pass"}}}\n'
+    status_file.write_text(existing, encoding="utf-8")
+    with pytest.raises(ValueError, match="请为这次运行选择独立的工作目录"):
+        await env.start_graph_run(yaml_path=program)
+    assert status_file.read_text(encoding="utf-8") == existing
+
+
+async def test_workflow_status_republishes_stale_file_without_published_keys(
+    tmp_path: Path,
+) -> None:
+    """三键全缺失（旧版整体重写）的 status.json 视为陈旧并重新发布，不报冲突。"""
+    env = GraphRunPlaneEnv(tmp_path)
+    program = env.write_workflow(
+        [{"id": "one", "task_type": "bash", "command": "test -s .workflow/status.json"}]
+    )
+    status_file = tmp_path / "wd" / ".workflow" / "status.json"
+    status_file.parent.mkdir(parents=True)
+    status_file.write_text('{"tasks": {"one": {"status": "pass"}}}\n', encoding="utf-8")
+    run_id = await env.start_graph_run(yaml_path=program, params={"starting_prompt": "开发 ABS"})
+    await await_run_status(env, run_id, {"completed"})
+    work_dir = tmp_path / "wd"
+    prompt_file = work_dir / ".workflow" / run_id / "user_prompt.md"
+    assert json.loads(status_file.read_text(encoding="utf-8")) == {
+        "workflow": str(program),
+        "work_dir": str(work_dir),
+        "user_prompt": str(prompt_file),
+    }
+
+
 async def test_relative_program_uses_current_project_and_reports_bad_path(
     tmp_path: Path,
 ) -> None:

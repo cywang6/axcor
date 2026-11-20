@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -225,3 +225,31 @@ def test_wait_session_done_preserves_legacy_waiter_signature() -> None:
     composed = _build_plugin_services(_mock_orchestrator(wait_session_done=legacy_waiter))
     assert asyncio.run(composed.wait_session_done("sid", timeout=10.0)) is True
     assert calls == [("sid", None), ("sid", 10.0)]
+
+
+def test_orchestrator_reload_plugin_delegates_without_hook_server() -> None:
+    """hook_server=None（端口被占启动失败）时 reload_plugin 仍委托 registry 卸载/加载。
+
+    回归锚：历史实现里 ``if self._hook_server is None: return False`` 会在
+    hook_server 起不来时把插件 toggle 整体短路——config.yaml 已翻 enabled、
+    内存插件状态却不变，前端 tab 显隐（依赖 manifest 加载标志）脱节。
+    """
+    orch = Orchestrator.__new__(Orchestrator)
+    calls: list[tuple[str, Any]] = []
+    orch._plugin_registry = SimpleNamespace(
+        reload_plugin=lambda name, o, hs: calls.append((name, hs)) or True,
+    )
+    orch._hook_server = None
+
+    assert orch.reload_plugin("demo") is True
+    assert calls == [("demo", None)]
+
+
+def test_register_hook_routes_tolerates_none_hook_server() -> None:
+    """hook_server=None 时 register_hook_routes 安全跳过，不抛 AttributeError。
+
+    插件在 hook_server 端口被占（_hook_server=None）时仍须能 install：注册
+    hook 路由这一步要容错跳过，而不是 ``None.register_route`` 崩掉整个 reload。
+    """
+    plugin = _HandoffPlugin(PluginConfig(name="x", version="0", enabled=True), None)
+    plugin.register_hook_routes(None, [("GET", "/x", lambda *a, **k: None)])

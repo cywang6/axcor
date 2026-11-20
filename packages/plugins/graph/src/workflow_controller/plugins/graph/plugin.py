@@ -26,7 +26,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import shutil
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
 
 from workflow_controller.plugin.sdk import Plugin, RunPanelDef
@@ -63,6 +65,61 @@ def _decode_driver_params(params: dict[str, str]) -> dict[str, Any]:
         except (TypeError, ValueError):
             decoded[key] = raw
     return decoded
+
+
+def _reconcile_existing_status(target: Path, values: dict[str, str], temp: Path) -> None:
+    """回读已存在的 status.json：三键全匹配则复用，键冲突报错，否则覆盖重发。"""
+    try:
+        existing = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        existing = None
+    if isinstance(existing, dict) and any(key in existing for key in values):
+        if not all(key in existing for key in values) or any(
+            existing.get(key) != value for key, value in values.items()
+        ):
+            raise ValueError(
+                f"{target} 已属于其他工作流或运行，请为这次运行选择独立的工作目录"
+            ) from None
+        return
+    # 三键全缺失或文件损坏：旧版工作流整体重写的陈旧残留，覆盖重发
+    shutil.copyfile(temp, target)
+
+
+def _publish_workflow_status(work_dir: Path, workflow: Path, user_prompt: Path) -> None:
+    """发布旧版工作流读取的路径信息，保留工作目录中已有的状态文件。
+
+    只核对本函数发布的三个键（workflow/work_dir/user_prompt）：旧版工作流
+    运行时可能往 status.json 追加自己的字段，恢复/重启时不能因这些无关字段
+    变化就误判为工作目录冲突。三键全缺失（旧版整体重写或文件损坏）视为陈旧
+    残留并重新发布；只要出现任一已发布键但值不符（或键不全）就报告冲突。
+    硬链接不可用的文件系统（部分网络盘/FAT）回退为普通复制。
+    """
+    target = work_dir / ".workflow" / "status.json"
+    values = {
+        "workflow": str(workflow.absolute()),
+        "work_dir": str(work_dir.absolute()),
+        "user_prompt": str(user_prompt.absolute()),
+    }
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(dir=target.parent, prefix=".graph-status-") as tmp_dir:
+        temp = Path(tmp_dir) / target.name
+        temp.write_text(json.dumps(values, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        try:
+            target.hardlink_to(temp)
+            return
+        except OSError:
+            pass
+        if target.exists():
+            _reconcile_existing_status(target, values, temp)
+            return
+        # 目标不存在：排他创建；并发竞态下已被其他进程创建则回读比对，
+        # 内容一致即复用而非误报冲突
+        content = temp.read_text(encoding="utf-8")
+        try:
+            with target.open("x", encoding="utf-8") as fh:
+                fh.write(content)
+        except FileExistsError:
+            _reconcile_existing_status(target, values, temp)
 
 
 class GraphDriverFactory:
@@ -215,6 +272,7 @@ class GraphPlugin(Plugin):
                 variables=variables,
                 starting_prompt=decoded.get("starting_prompt"),
                 user_prompt_path=user_prompt_path,
+                workflow_source=Path(run.program_ref) if run.program_ref else None,
                 **opts,
             )
             self._write_user_prompt(
@@ -235,7 +293,7 @@ class GraphPlugin(Plugin):
             if not snapshot:
                 raise ValueError(f"run {run.run_id} 无法恢复（无快照且内存无实例）")
             graph_id = str(snapshot.get("graph_id") or "") or self._derive_graph_id(run)
-            driver = self._driver_from_blob(run.run_id, graph_id, snapshot)
+            driver = self._driver_from_blob(run, graph_id, snapshot)
             logger.info("run %s rebuilt from driver snapshot", run.run_id)
         driver.prepare_recovery(
             running=run.status == "running",
@@ -289,6 +347,7 @@ class GraphPlugin(Plugin):
         starting_prompt: str | None = None,
         user_prompt_path: Path | None = None,
         applied_reopen_at: str | None = None,
+        workflow_source: Path | None = None,
         **opts: Any,
     ) -> GraphDriver:
         """组装正规驱动（create/快照恢复共用的唯一构造点）。"""
@@ -299,6 +358,10 @@ class GraphPlugin(Plugin):
         if user_prompt_path is not None:
             render_vars.update(WORK_DIR=str(work_dir), USER_PROMPT=str(user_prompt_path))
         program = translator.translate_program(yaml_path, render_vars, agents_dir_base)
+        if user_prompt_path is not None and any(
+            ".workflow/status.json" in str(node) for node in program.dag.nodes
+        ):
+            _publish_workflow_status(work_dir, workflow_source or yaml_path, user_prompt_path)
         state = _build_graph_state(graph_id, program, initial_payload)
         return GraphDriver(
             graph_id=graph_id,
@@ -352,11 +415,12 @@ class GraphPlugin(Plugin):
 
     def _driver_from_blob(
         self,
-        run_id: str,
+        run: Any,
         graph_id: str,
         blob: Mapping[str, Any],
     ) -> GraphDriver:
         """按驱动快照重建驱动（恢复链的共用工事；yaml 缺失即抛错）。"""
+        run_id = run.run_id
         yaml_path = Path(str(blob.get("yaml_path") or ""))
         if not yaml_path.is_file():
             raise FileNotFoundError(f"graph {graph_id} 程序档案缺失: {yaml_path}")
@@ -377,6 +441,7 @@ class GraphPlugin(Plugin):
             starting_prompt=blob.get("starting_prompt"),
             user_prompt_path=user_prompt_path,
             applied_reopen_at=blob.get("applied_reopen_at"),
+            workflow_source=Path(run.program_ref) if run.program_ref else None,
             **pick_runner_options(dict(blob.get("options") or {})),
         )
         if not user_prompt_path.exists():

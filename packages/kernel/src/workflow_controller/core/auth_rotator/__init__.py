@@ -765,7 +765,7 @@ class AuthRotator:
             raise ValueError(f"provider {provider_index} {capability} validation failed: {error}")
 
     async def set_keys_validated(self, keys: list[dict[str, str]]) -> None:
-        """Validate changed entries before replacing settings.conf."""
+        """Validate entries independently before replacing settings.conf."""
         validated: list[dict[str, Any]] = []
         normalized: list[dict[str, str]] = []
         kind_sources: list[str | None] = []
@@ -795,17 +795,20 @@ class AuthRotator:
             if result.get("provider_kind") and kind_source is None:
                 # 候选验证时无 kind，结果里的 kind 是本次实测探测所得
                 kind_source = "probe"
-            if (
-                result["worker"].get("status") != ValidationStatus.VALID.value
-                and result["reviewer"].get("status") != ValidationStatus.VALID.value
-            ):
+            if not result.get("success"):
                 error = (
                     result["worker"].get("error")
                     or result["reviewer"].get("error")
                     or "no usable worker or reviewer capability"
                 )
-                raise ValueError(f"provider validation failed: {error}")
-            if result["worker"].get("status") != ValidationStatus.VALID.value:
+                if existing is None:
+                    raise ValueError(f"provider validation failed: {error}")
+                logger.warning(
+                    "existing provider %s validation failed (saved state): %s",
+                    entry["model"] or "provider",
+                    error,
+                )
+            elif result["worker"].get("status") != ValidationStatus.VALID.value:
                 logger.warning(
                     "provider %s worker validation failed (saved reviewer-only): %s",
                     entry["model"] or "provider",
@@ -1410,7 +1413,6 @@ class AuthRotator:
                 prompt="Reply with exactly OK.",
                 model=model,
                 env=env,
-                temperature=0.0,
                 thinking_type=mode,
                 thinking_budget_tokens=2048,
             )
@@ -2219,12 +2221,18 @@ async def _resolve_settings_entry(
 
 
 def _existing_validations_match(existing: AuthProvider, fingerprint: str) -> bool:
-    """已有条目两项 VALID 验证的指纹与候选一致时可复用其结果。"""
-    return (
-        existing.worker_validation.fingerprint == fingerprint
-        and existing.worker_validation.status == ValidationStatus.VALID
-        and existing.reviewer_validation.fingerprint == fingerprint
-        and existing.reviewer_validation.status == ValidationStatus.VALID
+    """已有条目任一可用能力的验证指纹与候选一致时可复用其结果。
+
+    保存入口会整池提交（新增条目也会携带全部已有条目）。若只有双 VALID
+    才复用，历史上一侧失败的条目在每次保存新增 Provider 时都会被重测；
+    重测失败会中断整池保存，令用户误以为正在添加的新条目不可用。历史
+    至少一侧 VALID 已证明该条目具备可用能力，且配置指纹未变，复用其
+    结果；需要重新检测时用户可用行级「重新测试」强制执行。
+    """
+    worker = existing.worker_validation
+    reviewer = existing.reviewer_validation
+    return (worker.fingerprint == fingerprint and worker.status == ValidationStatus.VALID) or (
+        reviewer.fingerprint == fingerprint and reviewer.status == ValidationStatus.VALID
     )
 
 

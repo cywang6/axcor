@@ -68,7 +68,7 @@ class DriverReviewerRunner(ReviewerRunner):
     """Reviewer runner backed by the deterministic AnthropicHttpClient.
 
     The reviewer is a single-call LLM judge, so it runs through the raw-HTTP
-    client (one ``/v1/messages`` POST, temperature pinned at 0, no agent loop /
+    client (one ``/v1/messages`` POST, no sampling parameter, no agent loop /
     tools / CC system-prompt framing) instead of the worker's agent-loop
     driver. That removes the run-to-run variance (tool exploration + CC
     framing) that made reviewer decisions flaky.
@@ -153,7 +153,6 @@ class DriverReviewerRunner(ReviewerRunner):
             prompt=request.prompt,
             model=call_model,
             env=sdk_env,
-            temperature=0.0,
             thinking_budget_tokens=request.thinking_budget_tokens,
             thinking_type=thinking_type,
         )

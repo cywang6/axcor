@@ -187,8 +187,8 @@
       }
     },
     {
-      "id": "aihubmix-claude-opus",
-      "display_name": "AIHubMix Claude Opus",
+      "id": "yibuapi-claude-opus",
+      "display_name": "YibuAPI Claude Opus",
       "catalog": {
         "models": [
           {
@@ -228,7 +228,12 @@
             "supported_in_api": true,
             "priority": 0,
             "support_verbosity": false,
-            "experimental_supported_tools": []
+            "experimental_supported_tools": [],
+            "truncation_policy": {
+              "mode": "bytes",
+              "limit": 10000
+            },
+            "base_instructions": ""
           }
         ]
       }
