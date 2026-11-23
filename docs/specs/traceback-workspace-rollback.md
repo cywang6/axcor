@@ -475,7 +475,7 @@ nodes:
 
 | 回滚类型 | 统一操作 | 编排层附加动作 |
 |---|---|---|
-| 节点回滚（未合并） | 废弃目标作用域及后代 + 在当前 `root_integration_head` 重建（redo on latest integration head），目标 scope epoch+1 | Graph：目标节点回 pending、gen+1（reset 集 = `descendants(target) ∪ {target}`）；失效集外作用域零变化 |
+| 节点回滚（未合并） | 废弃目标作用域及后代 + 在当前 `root_integration_head` 重建（redo on latest integration head），目标 scope epoch+1 | Graph：目标节点回 pending、gen+1（reset 集 = `descendants(target) ∪ {target}`；验收失败回滚另含 `failed_node`；target 为动态子图节点时另含父 generator，特例见 §9.1.1）；失效集外作用域零变化 |
 | 节点回滚（已合并） | 集成线回退到目标检查点的 `integration_commit`（**不得用 `scope_base_commit`**）+ root epoch+1 | Graph：其后所有集成失效、基于失效基线的活动写者重跑（保守，D3） |
 | Graph 内子代理回滚 | `RestoreScope(node_scope, dispatch_group_start)` + 截断父对话 | Graph：目标节点原验收失效，重绑新 executor/epoch |
 | 单 session 子代理回滚 | 同上（父作用域 = 主 agent 作用域） | 无 DAG，替换当前执行代次 |
@@ -511,7 +511,22 @@ sequenceDiagram
 2. **scope epoch 递增**：旧 executor/子代理的迟到回执按 `(scope_id, scope_epoch)` 拒绝。
 3. **幂等**：`client_op_id` + `expected_epoch`；崩溃后由 oplog 核对（§11）。
 4. **职责分工**：核心做文件/作用域/epoch/对话恢复；Graph 在 `ScopeRestored` 后纯决策计算失效与新代。
-5. **通用 `plan_restore(target, reason, expected_gen)`**：既有 `plan_rollback` 的前提是 `failed_node` 为 `failed` 且 gen 匹配（服务验收失败自动回滚）；手动回滚、超时后 stopped 节点、子代理回滚都不满足——新函数承担全部回滚计划计算，既有 `plan_rollback` 成为其调用方之一；`expected_gen` 不匹配返回 None。
+5. **通用 `plan_restore(target, reason, expected_gen)`**：既有 `plan_rollback` 的前提是 `failed_node` 为 `failed` 且 gen 匹配（服务验收失败自动回滚）；手动回滚、超时后 stopped 节点、子代理回滚都不满足——新函数承担全部回滚计划计算（reset 集、新代、回滚边、预算），既有 `plan_rollback` 成为其调用方之一；`expected_gen` 不匹配返回 None。`plan_restore` 必须保留动态子图特例（§9.1.1）。
+
+### 9.1.1 动态子图（generator）目标的回滚特例
+
+动态子图是架构层已确认的现实（`docs/ARCHITECTURE.md` 崩溃恢复：「子图节点按归档代恢复」；graph 插件 `driver/scheduler.py::plan_rollback`/`apply_rollback` 已实现本特例，`plan_restore` 必须原样保留，否则按 §9.1 公式字面实现会把 generator 一并打回 pending、触发子图重新生成——语义错误）。
+
+**适用条件**：target 是动态子图节点（`state.subgraph_parent(target)` 非空；归属按 `subgraph_node_ids` 显式判定，不靠节点 id 中的 `:` 推断）。
+
+**语义**（与现码对齐）：
+
+1. reset 集 = `descendants(target) ∪ {target}`，另加父 generator——generator 计入 reset 集并与其他节点共用同一新回滚代（`new_gen`），但**立即置回 `passed`：不重新编排、不重新生成子图**。
+2. generator 已生成的子图**不废弃**（废弃清单排除 `parent_gen_node`）；reset 集中**其他** generator 节点的旧子图照常废弃（重新生成才能合并新拓扑）。
+3. 回滚边记在 generator 上：`(parent_gen_node, old_parent_gen) → (parent_gen_node, new_gen)`，而不是默认的 `(failed_node, failed_gen) → (target, new_gen)`。
+4. 主图下游（descendants 内）一起 reset；子图重跑通过后这些下游重新运行。
+
+**作用域树映射**：generator 没有新 attempt——其作用域与已集成成果（含已合并子图节点的集成）保留，仅子图目标节点及其后代的作用域被废弃并从当前集成头重建。这与「未合并回滚不动集成线」一致：generator 的产物既已集成，自然包含在新基线中。
 
 ### 9.2 已合并节点回滚（保守失效，D3）
 
@@ -778,6 +793,7 @@ traceback:
 34. **组恢复点不可变**：后续派发 `child_base_commit` 前进，`dispatch_group_start.commit` 不变；恢复统一回组恢复点。
 35. **多副作用组禁止只重放目标 task**：此类 `replay_dispatch` 请求拒绝执行并返回明确错误。
 36. **inherit_from 分层解析**：YAML 逻辑声明经 Graph 解析为当前有效三元组；上游已回滚/废弃时解析拒绝；三元组随建区请求记账可审计。
+37. **动态子图回滚特例**：target 为子图节点时，父 generator 进新回滚代但立即置回 `passed`、不重新编排、其子图不废弃；回滚边记在 generator 上；主图下游随子图重跑通过后重新运行。
 
 ### 17.2 测试层次
 

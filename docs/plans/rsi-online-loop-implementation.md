@@ -54,7 +54,7 @@ related_specs:
 |---|---|---|---|---|
 | P2.1 | graph engine cwd 注入（7 处 `cwd=self._work_dir` 改为作用域工作区 + `WORKSPACE_DIR` 注入）；节点 executor/verifier 出生映射 `PrepareScopeWorkspace`；`awaiting_integration` 定序 + executor→verifier 闸门；`scope_start`/`terminal` 打点接线 | Graph 接线 + 集成测试 | P1.3、P1.4 | 双节点并行写不相交路径隔离 + 按序集成；验收通过 ≠ 集成完成（`awaiting_integration` 居中）；executor 后台写未静止前 verifier 不得启动 |
 | P2.2 | 路径集冲突检测（全部事件对，以 `integration_base_commit` 为基准、限定 merge 路径集）+ claims 软预检 + `fault.workspace_conflict` 入 watchdog 词表 | 冲突检测 + 单测/集成测试 | P2.1 | 同文件并行写（含 Git 可自动合并）被检出；writer 修改 writer_local 路径、父树无变化时不误报；载荷含冲突路径与双方身份 |
-| P2.3 | 未合并节点回滚异步状态机：通用 `plan_restore`（既有 `plan_rollback` 变为其调用方之一）、`AbandonScope`/`RestoreScope`/`PrepareScopeWorkspace` 动作、driver/op 异步化（op 只登记 `pending_rollback` 返回 operation_id）、`GET .../scopes`、`GET .../checkpoints`、`GET .../operations/{id}` 端点 | 异步回滚 + Web 端点 + 集成测试 | P2.2 | op 立即返回 operation_id；回滚幂等、旧 epoch 回执被拒、失效集外零变化；兄弟已集成时新基线含其成果（redo on latest integration head） |
+| P2.3 | 未合并节点回滚异步状态机：通用 `plan_restore`（既有 `plan_rollback` 变为其调用方之一，并保留动态子图特例——target 为子图节点时父 generator 进新回滚代但立即置回 passed、不重新编排、其子图不废弃、回滚边记在 generator）、`AbandonScope`/`RestoreScope`/`PrepareScopeWorkspace` 动作、driver/op 异步化（op 只登记 `pending_rollback` 返回 operation_id）、`GET .../scopes`、`GET .../checkpoints`、`GET .../operations/{id}` 端点 | 异步回滚 + Web 端点 + 集成测试 | P2.2 | op 立即返回 operation_id；回滚幂等、旧 epoch 回执被拒、失效集外零变化；兄弟已集成时新基线含其成果（redo on latest integration head）；generator 特例符合 spec §9.1.1 |
 
 ### P3：RSI fix-findings 闭环
 
@@ -96,7 +96,7 @@ related_specs:
 | 6 | S1d | `core/checkpoint/store.py` 迁移 + RunStore schema 迁移接线 + `scope_start`/`terminal` 打点与持久化顺序 | P1.4 | S1b | schema 经 RunStore 管理；旧行兼容读取 | ☐ |
 | 7 | S2a | Graph 接线：engine cwd/`WORKSPACE_DIR` 注入、executor/verifier 映射 `PrepareScopeWorkspace`、`awaiting_integration` 定序、executor→verifier 闸门 | P2.1 | S1c、S1d | 双节点并行写不相交路径隔离 + 按序集成；verifier 时序正确 | ☐ |
 | 8 | S2b | 路径集冲突检测 + claims 软预检 + `fault.workspace_conflict`/`fault.scope_quiesce_failed` 入 watchdog 词表 | P2.2 | S2a | 全部路径事件对拒绝用例；writer_local 不误报 | ☐ |
-| 9 | S2c | 未合并节点回滚异步状态机：`plan_restore`、作用域动作、driver/op 异步化与 operation_id、scopes/checkpoints/operations 查询端点 | P2.3 | S2b | 幂等、旧 epoch 拒绝、失效集外零变化、redo-on-latest-head 语义 | ☐ |
+| 9 | S2c | 未合并节点回滚异步状态机：`plan_restore`（含动态子图特例）、作用域动作、driver/op 异步化与 operation_id、scopes/checkpoints/operations 查询端点 | P2.3 | S2b | 幂等、旧 epoch 拒绝、失效集外零变化、redo-on-latest-head 语义；target 为子图节点时 generator 置回 passed 不重跑、其子图不废弃、回滚边记在 generator | ☐ |
 | 10 | S3a | watchdog 超时能力：子代理独立计时 + 节点累计超时 `fault.node_timeout`（与 P1/P2 可并行，此处按合入序排列） | P3.1 | S0a | 慢任务与卡死任务均按时告警；暂停不计时、重启保留已用时间 | ☐ |
 | 11 | S3b | 当前文件加载：更新现有 Run 任务定义、保留节点状态与产物、不新建 Run | P3.2 | S2c | 修复后原 Run 加载新定义继续 | ☐ |
 | 12 | S3c | 接入仓：adapter.mjs + opsbot_bridge.py + start_online.py（含定时 tick 与重启恢复核对） | P3.3 | S2c、S3a | 重启恢复原任务，不重复创建 loop/Graph | ☐ |
@@ -167,7 +167,7 @@ D7 双轨（opencode 上游推动 + 宿主接管 task 工具 spike）与 P4 并�
 
 ## 7. 验收标准
 
-- [ ] 规格 §17.1 关键验收清单第 1–36 项全部通过（各阶段对应项随里程碑验收）。
+- [ ] 规格 §17.1 关键验收清单第 1–37 项全部通过（各阶段对应项随里程碑验收）。
 - [ ] fix-findings e2e：超时 → 暂停 → 导出 → 修复 → 回滚 → resume → 下游继续；候选在同时限内完成原验收；整图完成后用修复后源码从头开始下一轮。
 - [ ] 重复事件不重复回滚；旧代事件不改变新代；恢复文件后节点状态与文件一致；候选测试通过后主图真实继续。
 - [ ] 关闭 traceback 时拒绝文件回滚；开启后可恢复纯节点起点；并行任务按检查点重置；存在中间产物时退到安全起点或明确拒绝。
