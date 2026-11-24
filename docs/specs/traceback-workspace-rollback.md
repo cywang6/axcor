@@ -55,7 +55,7 @@ related_plans:
 - fail-fast（D2）：无法建立安全隔离时显式失败，不自动降级。
 - 架构门禁：`plugins.<name>` 禁止依赖 `core/driver/store/api/web`；核心禁止依赖具体插件；迁移期插件经 SDK 端口访问核心。
 
-产品决策 D1–D8（统一作用域树、fail-fast、保守失效、默认 writer、终态同步、单基线历史、双轨屏障、协作式隔离）见 ADR-0001，本文直接引用。
+产品决策 D1–D9（统一作用域树、fail-fast、保守失效、默认 writer、终态同步、单基线历史、双轨屏障、协作式隔离、冲突检测默认 `git_merge` 档）见 ADR-0001，本文直接引用。
 
 ## 2. 现状盘点与差距
 
@@ -180,10 +180,12 @@ flowchart TD
     subgraph DRV["驱动层（既有）"]
         SESS["Session / SubagentTracker + 派发屏障"]
     end
-    subgraph WEB["Web / API"]
+    subgraph WEB["控制台发行包（跨仓，不在本仓）"]
         RA["runs_routes（薄 handler）"]
     end
-    RA --> RC
+    CA["CoreAPI（api/，本仓）"]
+    RA --> CA
+    CA --> RC
     RC <-->|"动作 → / 通知 ←"| GD
     RC -->|"执行动作（唯一 I/O 手）"| WS
     RC --> CP
@@ -276,7 +278,7 @@ stateDiagram-v2
     Preparing --> Active: worktree 建立成功（失败即 fail-fast）
     Active --> AwaitingIntegration: 验收通过（Graph）或子代理/session 完成
     AwaitingIntegration --> Integrated: 闸门 + 冲突预检通过（§8.1 档位）+ 串行集成成功
-    AwaitingIntegration --> Conflicted: strict 档路径集重叠 / git_merge 档合并冲突 / 闸门失败降级待定
+    AwaitingIntegration --> Conflicted: path_set 档路径集重叠 / git_merge 档合并冲突 / 闸门失败降级待定
     Integrated --> Released: 立即释放（默认）或保留窗口后释放
     Active --> Discarded: 未合并回滚 / 重试且基线变化（scope epoch+1）
     Released --> [*]: worktree prune
@@ -316,7 +318,7 @@ stateDiagram-v2
 | `writer_local` + `rebuildable` | ✗ | ✗ | 留空，执行重建脚本 | 重跑重建脚本 |
 | `shared_*` / `external` | ✗ | ✗ | 符号链接 / 不处理 | 租约回收 + 外部重建协议 |
 
-集成用**按路径构造集成树**：`git diff integration_base_commit..head -- <merge 路径集>` 生成补丁，在父闸门内应用到父树并提交；路径集相交时按 §8.1 档位处理（`git_merge` 档对相交路径取 merge-tree 三方合并结果入集成树，`strict` 档已在冲突检测拒绝、到不了本步）；`writer_local + checkpointed` 路径永远留在作用域分支与检查点里，不进集成 diff。
+集成用**按路径构造集成树**：`git diff integration_base_commit..head -- <merge 路径集>` 生成补丁，在父闸门内应用到父树并提交；路径集相交时按 §8.1 档位处理（`git_merge` 档对相交路径取 merge-tree 三方合并结果入集成树，`path_set` 档已在冲突检测拒绝、到不了本步）；`writer_local + checkpointed` 路径永远留在作用域分支与检查点里，不进集成 diff。
 
 **作用域的两个基线字段**（职责严格分离）：
 
@@ -369,7 +371,6 @@ CREATE TABLE IF NOT EXISTS scope_checkpoints (
     root_epoch       INTEGER NOT NULL,
     trigger          TEXT NOT NULL,       -- scope_start | before_child | terminal
     barrier_quality  TEXT NOT NULL,       -- precise | late_barrier
-    git_ref          TEXT,                -- snapshot 兼容模式快照仓 commit
     workspace_branch TEXT,
     workspace_commit TEXT,
     integration_commit TEXT,              -- 建点时父作用域头（子代理 = child_base_commit；
@@ -422,14 +423,14 @@ CREATE TABLE IF NOT EXISTS scopes (
 
 `scope_epoch` 标识「这个作用域的第几代实例」，旧回执按 `(scope_id, scope_epoch)` 拒绝；`root_epoch` 只在集成线回退时递增，拒绝基于失效基线的集成与回滚请求。回滚请求的 `expected_epoch` 按操作对象取对应层。
 
-## 8. 冲突检测：默认可合并性为准，strict 档按路径集重叠
+## 8. 冲突检测：默认可合并性为准，path_set 档按路径集重叠
 
 ### 8.1 硬保证：两档判定（闸门内执行）
 
 冲突判定由配置项 `traceback.workspace.conflict_policy` 选档（§15），按集成根生效：
 
 - `git_merge`（默认）：以 Git 三方合并结果为准——同一 merge 路径被双方修改、但合并干净（hunk 不相交，如一方改文件上半、另一方改下半）即放行；只有真实合并冲突才发 `fault.workspace_conflict`。
-- `strict`：路径集重叠即违规——任何两个并发写者改同一 merge 路径（无论 Git 能否自动合并）都拒绝，适用于「并发单元不得改同一文件」需硬保证的场景。
+- `path_set`：路径集重叠即违规——任何两个并发写者改同一 merge 路径（无论 Git 能否自动合并）都拒绝，适用于「并发单元不得改同一文件」需硬保证的场景。
 
 判定（全部在父作用域闸门内，扫描与 merge 之间无竞态）：
 
@@ -440,7 +441,7 @@ writer_paths = pathset(diff(R, writer_head))  ∩ merge 路径集
 parent_paths = pathset(diff(R, parent_head))  ∩ merge 路径集
 overlap = writer_paths ∩ parent_paths
 overlap = ∅            → 按路径构造集成树（base = R）应用 merge 路径 diff → 发布 → 解冻
-overlap ≠ ∅ 且 strict  → fault.workspace_conflict（集成不发生）
+overlap ≠ ∅ 且 path_set  → fault.workspace_conflict（集成不发生）
 overlap ≠ ∅ 且 git_merge → 对 overlap 路径做三方合并（git merge-tree，base = R）：
     合并干净 → 合并结果随集成树一并提交 → 发布 → 解冻
     合并冲突 → fault.workspace_conflict（集成不发生）
@@ -448,11 +449,11 @@ overlap ≠ ∅ 且 git_merge → 对 overlap 路径做三方合并（git merge-
 
 同一公式覆盖三个冲突来源：并行子代理互撞（parent_paths 含先到者已合入的 diff）；父后台写入与子代理撞（闸门内落账的父写入）；Graph 并行节点撞（节点集成时 parent_paths = 建区时 root_integration_head 之后的集成线变化）。
 
-`strict` 档必须覆盖的路径事件（路径出现于双侧变更集即命中，全部拒绝）：modify/modify（即使 hunk 不重叠、Git 可自动合并）、add/add（即使内容相同）、delete/modify、delete/delete 后重建、rename（按旧删+新增计）、目录/文件替换、symlink 与普通文件互换、类型/模式变化。
+`path_set` 档必须覆盖的路径事件（路径出现于双侧变更集即命中，全部拒绝）：modify/modify（即使 hunk 不重叠、Git 可自动合并）、add/add（即使内容相同）、delete/modify、delete/delete 后重建、rename（按旧删+新增计）、目录/文件替换、symlink 与普通文件互换、类型/模式变化。
 
 `git_merge` 档下同一事件集由 merge-tree 判定：modify/modify 不相交 hunk 放行、相交即冲突；add/add 内容相同放行、不同即冲突；delete/modify、delete/delete 后重建、rename 交叉、目录/文件替换、symlink 与普通文件互换、类型/模式变化等 Git 判冲突的事件照常拒绝。
 
-`git merge-tree` 的角色随档位变化：`git_merge` 档它是「同文件是否冲突」的判定器与合并内容生成器；`strict` 档它只在路径集预检通过后作可合并性检查，不承担「是否同文件」判定。符号链接目标内容的修改不经过任何 writer 的 git diff，共享路径靠 §8.2 强制手段。
+`git merge-tree` 的角色随档位变化：`git_merge` 档它是「同文件是否冲突」的判定器与合并内容生成器；`path_set` 档它只在路径集预检通过后作可合并性检查，不承担「是否同文件」判定。符号链接目标内容的修改不经过任何 writer 的 git diff，共享路径靠 §8.2 强制手段。
 
 fault payload：冲突路径、双方身份、双侧 commit、共同基线（`git_merge` 档冲突路径以 merge-tree 报告为准）。冲突策略：`fail_unit`（执行单元 failed，进重试/回滚预算）或 `pause_for_repair`（Run 暂停等修复）。
 
@@ -470,7 +471,7 @@ nodes:
     writes: ["op/op_kernel/**", "op/build/autogen/**"]
 ```
 
-单元出生/派发时登记 claims；活动写者 claims glob 求交非空即拒绝第二个单元出生（事件 `workspace.claim_rejected`）。声明与实际不符不阻塞——§8.1 硬保证兜底，`file_provenance` 事后核对记审计事件。不声明 `writes` 的单元只受硬保证约束。
+单元出生/派发时登记 claims；`claims.enforce: true`（§15，默认 `false`）时活动写者 claims glob 求交非空即拒绝第二个单元出生（事件 `workspace.claim_rejected`）。拒绝是显式开启的硬预检，与 `path_set` 档配套；默认 `git_merge` 档下 claims 只登记不拒绝——避免「声明了写路径反而被拒出生、不声明却能合并通过」的倒挂。声明与实际不符不阻塞——§8.1 判定兜底，`file_provenance` 事后核对记审计事件。不声明 `writes` 的单元只受 §8.1 判定约束。
 
 ### 8.4 与 RSI 闭环的衔接
 
@@ -486,6 +487,8 @@ nodes:
 | 节点回滚（已合并） | 集成线回退到目标检查点的 `integration_commit`（**不得用 `scope_base_commit`**）+ root epoch+1 | Graph：其后所有集成失效、基于失效基线的活动写者重跑（保守，D3） |
 | Graph 内子代理回滚 | `RestoreScope(node_scope, dispatch_group_start)` + 截断父对话 | Graph：目标节点原验收失效，重绑新 executor/epoch |
 | 单 session 子代理回滚 | 同上（父作用域 = 主 agent 作用域） | 无 DAG，替换当前执行代次 |
+
+**验收失败回滚的目标必已集成**：`rollback_to` 被校验为失败节点的严格祖先，而 §6.1 下祖先 `passed` ⟺ 集成成功。因此验收失败回滚一律按上表「未合并」行（§9.1）的编排语义执行——废弃目标作用域及后代、在当前集成头重建，目标既有集成成果保留在集成线、不做文件撤回（与改造前共享目录行为一致，§9.1.1 对 generator 的处理即此通则的特例化）；§9.2 的集成线回退只服务显式的已合并回滚请求，不由验收失败回滚触发。
 
 请求参数：`scope_id` + `checkpoint_id` + `client_op_id` + `expected_epoch`。同一 `client_op_id` 重复请求返回原结果；**同键携带不同目标/检查点返回冲突错误**；`expected_epoch` 不匹配拒绝并返回当前 epoch。
 
@@ -696,7 +699,7 @@ fix-findings 案例在本模型下的行为：
 | `$WORK_DIR/op/build/` 旧打包产物 | `writer_local + rebuildable`（确定性重建脚本 + 验收；无法保证则改 `checkpointed`） |
 | 节点超时 → 回滚 → resume | §9.1 异步状态机（第一版验证路径） |
 | CANN/GEIR 探测读外部安装 | `external`：固定脚本重建核对 |
-| 上游与 fix-findings 并行写 `CODE_REVIEW.md` | claims 预检拒绝；漏声明则集成时按 §8.1 档位判定：默认 `git_merge` 档三方合并干净即放行、真冲突才报错；`strict` 档路径集命中即拒绝 |
+| 上游与 fix-findings 并行写 `CODE_REVIEW.md` | claims 预检（`claims.enforce` 开启时）拒绝；默认只登记，集成时按 §8.1 档位判定：`git_merge` 档三方合并干净即放行、真冲突才报错；`path_set` 档路径集命中即拒绝 |
 
 ## 15. 配置面
 
@@ -716,7 +719,7 @@ traceback:
     retain_after_merge: false
     history_import: off          # off（默认，D6）| readonly
     conflict_policy: git_merge   # git_merge（默认，D9）：三方合并干净即放行、真冲突报错
-                                 # | strict：路径集重叠即 fault.workspace_conflict
+                                 # | path_set：路径集重叠即 fault.workspace_conflict
     manifest:
       merge: []
       writer_local: ["**/build/**", "**/__pycache__/**", "**/*.log"]
@@ -761,13 +764,14 @@ traceback:
 | 19 | 构建产物全入 Git 成本超标 | §4 量化 spike 前置；超标路径改 rebuildable 或 reflink/内容寻址仓 |
 | 20 | inherit_from 绑定复杂度与误用 | 四要素闭环 + 路径集不相交硬检；第一版只做单上游绑定 |
 | 21 | 双基线字段误用 | §6.2 职责分离；§8.1/§9.2 强制 integration_base/integration_commit；验收 #31/#32 兜底 |
+| 22 | `git_merge` 档合并结果未经验收（调用方与被调方各改一半，语义冲突运行期才暴露） | 关键路径改 `path_set` 档或开 `claims.enforce` 预检；集成审计留痕（merge-path diff）支撑事后归因 |
 
 ## 17. 验收标准与测试
 
 ### 17.1 关键验收清单
 
 1. **隔离**：双单元并行写不相交路径互不可见；集成后父树含双方产出。
-2. **冲突（两档）**：`git_merge` 档同文件不相交 hunk 并行写自动合并放行、真实合并冲突拒绝；`strict` 档 §8.1 全部路径事件对均拒绝；载荷含路径与双方身份。
+2. **冲突（两档）**：`git_merge` 档同文件不相交 hunk 并行写自动合并放行、真实合并冲突拒绝；`path_set` 档 §8.1 全部路径事件对均拒绝；载荷含路径与双方身份。
 3. **闸门**：操作期间父作用域静止（结构性断言 + 后台排空注入测试）；不可静止时按父是否阻塞分支处理；绝不在活动脏工作区合并。
 4. **集成定序**：验收通过 → `awaiting_integration` → 集成成功才 `passed`；冲突时未通过。
 5. **路径策略四组合**（§6.2 表）行为正确；缺脚本的 rebuildable 自动按 checkpointed。
@@ -803,12 +807,13 @@ traceback:
 35. **多副作用组禁止只重放目标 task**：此类 `replay_dispatch` 请求拒绝执行并返回明确错误。
 36. **inherit_from 分层解析**：YAML 逻辑声明经 Graph 解析为当前有效三元组；上游已回滚/废弃时解析拒绝；三元组随建区请求记账可审计。
 37. **动态子图回滚特例**：target 为子图节点时，父 generator 进新回滚代但立即置回 `passed`、不重新编排、其子图不废弃；回滚边记在 generator 上；主图下游随子图重跑通过后重新运行。
+38. **验收失败回滚不撤文件**：`rollback_to` 目标必已集成（§9）；回滚按 §9.1 编排语义执行，集成线不变、目标既有集成成果保留为新 attempt 基线，不触发 §9.2 集成线回退。
 
 ### 17.2 测试层次
 
 | 层 | 内容 | 位置 |
 |---|---|---|
-| 单元 | worktree CRUD、闸门、两档冲突判定（strict 全事件对、git_merge 可合并性）、按路径集成树、四组合、claims、两层 epoch 幂等、saga 崩溃恢复、dispatch_anchor、组仲裁、message 级截断、replay 限制、终态三方同步 | `packages/kernel/kernel_tests/workspace/`、`packages/kernel/kernel_tests/checkpoint/` |
+| 单元 | worktree CRUD、闸门、两档冲突判定（path_set 全事件对、git_merge 可合并性）、按路径集成树、四组合、claims、两层 epoch 幂等、saga 崩溃恢复、dispatch_anchor、组仲裁、message 级截断、replay 限制、终态三方同步 | `packages/kernel/kernel_tests/workspace/`、`packages/kernel/kernel_tests/checkpoint/` |
 | 架构门禁 | 无受保护成员字符串访问；core 不 import 插件/Graph；插件不 import core | `tests/architecture/` |
 | 集成 | fake_driver 双节点并行/冲突/回滚全链路；异步回滚时序；屏障 fail-closed；闸门降级 | `packages/plugins/graph/tests/`、`packages/kernel/kernel_tests/integration/` |
 | e2e | fix-findings 全链路；真实子代理回滚案例（claude SDK） | `tests/e2e/` + 服务器实验 |

@@ -15,7 +15,7 @@ related_specs:
 
 # RSI 在线时长修复闭环与工作区隔离回滚实施计划
 
-> 本计划覆盖两个文档界定的全部工作：[traceback 工作区隔离与统一回滚技术规格](../specs/traceback-workspace-rollback.md)（本仓，OpsBot 侧）与 [RSI 在线时长修复闭环规格](../specs/rsi-online-repair-loop.md)（跨仓：本仓 + RSI 仓 + 接入仓）。施工顺序按规格与 [ADR-0001](../adr/0001-worktree-scope-tree-unified-rollback.md) 已确认的决策执行：**Graph 节点级垂直切片与 RSI fix-findings 闭环先行（P0–P3），dispatch_group + 子代理回滚 + 已合并回滚其次（P4），单 session 迁移与插件退出最后（P5）**。首期 fix-findings 节点无内部子代理，不需要先实现 P4 能力。架构方案变更时先改设计文档再动代码。
+> 本计划覆盖两个文档界定的全部工作：[traceback 工作区隔离与统一回滚技术规格](../specs/traceback-workspace-rollback.md)（本仓，OpsBot 侧）与 [RSI 在线时长修复闭环规格](../specs/rsi-online-repair-loop.md)（跨仓：本仓 + RSI 仓 + 接入仓 + 控制台发行包）。施工顺序按规格与 [ADR-0001](../adr/0001-worktree-scope-tree-unified-rollback.md) 已确认的决策执行：**Graph 节点级垂直切片与 RSI fix-findings 闭环先行（P0–P3），dispatch_group + 子代理回滚 + 已合并回滚其次（P4），单 session 迁移与插件退出最后（P5）**。首期 fix-findings 节点无内部子代理，不需要先实现 P4 能力。架构方案变更时先改设计文档再动代码。
 
 ## 1. 目标与范围
 
@@ -46,7 +46,7 @@ related_specs:
 |---|---|---|---|---|
 | P1.1 | `core/workspace/repository.py`：私有仓布局、基线导入（脏文件+未跟踪+内部 git 保留路径+排除清单防递归）、首层物化与 `scope_base_commit`、`root_seed_checkpoint`/`root_integration_head` | Repository 模块 + 单测 | P0.2 | 含未提交/未跟踪/用户 `.git` 的目录建区基线逐字节一致；用户仓 refs/HEAD/index/hooks 未改；根目录无 OpsBot git 元数据 |
 | P1.2 | `core/workspace/scope_tree.py`（作用域账本 + 两层 epoch）+ `core/workspace/gate.py`（闸门状态机）+ `core/workspace/oplog.py`（三阶段 saga） | 账本/闸门/oplog + 单测 | P1.1 | 作用域 CRUD/epoch 幂等单测；闸门状态机与降级分支单测；saga 三阶段崩溃注入（含 GIT_WRITTEN 前判据、分叉即停不 reset） |
-| P1.3 | `core/workspace/manager.py`（worktree 生命周期、物化、GC）+ `core/workspace/integration.py`（串行集成 + 按路径集成树，相交路径按 `conflict_policy` 档位处理：git_merge 走 merge-tree 三方合并、strict 在 P2.2 拒绝）+ 通用动作/通知协议类型 + `core/workspace/manifest.py`（两维路径策略） | 工作区/集成/manifest + 单测 | P1.2 | fake 编排经协议建区/集成；四组合路径策略行为正确；writer_local 不误报冲突 |
+| P1.3 | `core/workspace/manager.py`（worktree 生命周期、物化、GC）+ `core/workspace/integration.py`（串行集成 + 按路径集成树，相交路径按 `conflict_policy` 档位处理：git_merge 走 merge-tree 三方合并、path_set 在 P2.2 拒绝）+ 通用动作/通知协议类型 + `core/workspace/manifest.py`（两维路径策略） | 工作区/集成/manifest + 单测 | P1.2 | fake 编排经协议建区/集成；四组合路径策略行为正确；writer_local 不误报冲突 |
 | P1.4 | `core/checkpoint/store.py` 迁移（自插件 CheckpointStore）：核心新建 `scope_checkpoints` 表、schema 经 RunStore 统一迁移管理；插件旧 `checkpoints` 表并存至 P5 零改动（同表加 NOT NULL 列会撞插件并存写入，spec §7）；检查点类型 `scope_start`/`terminal` 与持久化顺序（编排状态→文件 commit→检查点行→发布）的 store 侧支持，生命周期触发接线在 P2.1 | CheckpointStore + 迁移单测 | P1.2 | schema 由 RunStore 迁移管理；并存期插件旧形态写入不受新 schema 影响；旧表历史行经兼容读取器读取 |
 
 ### P2：Graph 节点级垂直切片（旧单 session 与插件路径不动）
@@ -54,8 +54,8 @@ related_specs:
 | ID | 任务 | 产出 | 依赖 | 验收 |
 |---|---|---|---|---|
 | P2.1 | graph engine cwd 注入（7 处 `cwd=self._work_dir` 改为作用域工作区 + `WORKSPACE_DIR` 注入）；节点 executor/verifier 出生映射 `PrepareScopeWorkspace`；`awaiting_integration` 定序 + executor→verifier 闸门；`scope_start`/`terminal` 打点接线；**RunCoordinator 生产执行桥**——`PrepareScopeWorkspace`/`IntegrateScope` 等动作的生产派发接线（spec §5.1：协调器是唯一 I/O 手；P1.3 的 fake 编排只覆盖测试侧） | Graph 接线 + 协调器执行桥 + 集成测试 | P1.3、P1.4 | 双节点并行写不相交路径隔离 + 按序集成；验收通过 ≠ 集成完成（`awaiting_integration` 居中）；executor 后台写未静止前 verifier 不得启动 |
-| P2.2 | 两档冲突检测（`conflict_policy`：`git_merge` 默认 = 以 `integration_base_commit` 为基准、限定 merge 路径集求交后走 merge-tree 可合并性判定；`strict` = 路径集重叠即拒绝，覆盖全部事件对）+ claims 软预检 + `fault.workspace_conflict` 入 watchdog 词表 | 冲突检测 + 单测/集成测试 | P2.1 | git_merge 档同文件不相交 hunk 并行写自动合并放行、真实合并冲突检出；strict 档同文件并行写（含 Git 可自动合并）检出；writer 修改 writer_local 路径、父树无变化时不误报；载荷含冲突路径与双方身份 |
-| P2.3 | 未合并节点回滚异步状态机：通用 `plan_restore`（既有 `plan_rollback` 变为其调用方之一，并保留动态子图特例——target 为子图节点时父 generator 进新回滚代但立即置回 passed、不重新编排、其子图不废弃、回滚边记在 generator）、`AbandonScope`/`RestoreScope`/`PrepareScopeWorkspace` 动作、driver/op 异步化（op 只登记 `pending_rollback` 返回 operation_id）、内核 CoreAPI 增加 scopes/checkpoints/operations 查询与回滚方法（HTTP 路由 `GET .../scopes`、`GET .../checkpoints`、`GET .../operations/{id}` 的装配 PR 开在控制台发行包） | 异步回滚 + CoreAPI 扩展 + 集成测试（控制台路由 PR 登记在控制台仓） | P2.2 | op 立即返回 operation_id；回滚幂等、旧 epoch 回执被拒、失效集外零变化；兄弟已集成时新基线含其成果（redo on latest integration head）；generator 特例符合 spec §9.1.1 |
+| P2.2 | 两档冲突检测（`conflict_policy`：`git_merge` 默认 = 以 `integration_base_commit` 为基准、限定 merge 路径集求交后走 merge-tree 可合并性判定；`path_set` = 路径集重叠即拒绝，覆盖全部事件对）+ claims 软预检 + `fault.workspace_conflict` 入 watchdog 词表 | 冲突检测 + 单测/集成测试 | P2.1 | git_merge 档同文件不相交 hunk 并行写自动合并放行、真实合并冲突检出；path_set 档同文件并行写（含 Git 可自动合并）检出；writer 修改 writer_local 路径、父树无变化时不误报；载荷含冲突路径与双方身份 |
+| P2.3 | 未合并节点回滚异步状态机：通用 `plan_restore`（既有 `plan_rollback` 变为其调用方之一，并保留动态子图特例——target 为子图节点时父 generator 进新回滚代但立即置回 passed、不重新编排、其子图不废弃、回滚边记在 generator）、`AbandonScope`/`RestoreScope`/`PrepareScopeWorkspace` 动作、driver/op 异步化（op 只登记 `pending_rollback` 返回 operation_id）、内核 CoreAPI 增加 scopes/checkpoints/operations 查询与回滚方法（HTTP 路由 `GET .../scopes`、`GET .../checkpoints`、`GET .../operations/{id}` 的装配 PR 开在控制台发行包） | 异步回滚 + CoreAPI 扩展 + 集成测试（控制台路由 PR 登记在控制台仓） | P2.2 | op 立即返回 operation_id；回滚幂等、旧 epoch 回执被拒、失效集外零变化；rollback_to 验收失败回滚按 §9.1 编排语义执行（目标既有集成成果保留、不做文件撤回，spec §9）；兄弟已集成时新基线含其成果（redo on latest integration head）；generator 特例符合 spec §9.1.1 |
 
 ### P3：RSI fix-findings 闭环
 
@@ -80,12 +80,12 @@ related_specs:
 | ID | 任务 | 产出 | 依赖 | 验收 |
 |---|---|---|---|---|
 | P5.1 | 资产下沉：单 session 作用域树接入 + 终态三方同步（基线参照、含删除生效、外部变化停止覆盖并报告冲突）+ live view 端点 | 单 session 迁移 + 单测 | P4.2 | D5 行为正确；agent 删除基线文件终态同步生效；基线外用户新增文件不被误删 |
-| P5.2 | 能力迁移：对话恢复/文件预览/历史检查点读取/清理（reaper）并入核心与主 Web；`import-db` 独立为 session 导入能力；历史快照兼容读取器 | 迁移后的能力 + 回归 | P5.1 | 全部现有对外端点有主 Web 等价物；单 session 重放/import 在迁移前后两点不回退 |
+| P5.2 | 能力迁移：对话恢复/文件预览/历史检查点读取/清理（reaper）并入核心与主 Web（控制台发行包，跨仓 PR）；`import-db` 独立为 session 导入能力；历史快照兼容读取器 | 迁移后的能力 + 回归 | P5.1 | 全部现有对外端点有主 Web 等价物；单 session 重放/import 在迁移前后两点不回退 |
 | P5.3 | 删除 `packages/plugins/agent-traceback/`；snapshot 兼容模式收尾 | 插件删除 | P5.2 且全部开发完成 | 全量测试与 e2e 全部通过后插件目录出仓；`file_provenance` 不受影响 |
 
 ## 4. PR 级施工顺序
 
-每个 PR 单一主题；变更量建议 100–500 行、上限 1000 行，修改文件建议 5–20 个、超过 30 个应拆分（评审体量约束）；行为变化不与结构搬移混排。S 编号即建议的 PR 顺序；跨仓 PR（S3c–S3e、S4 中 RSI 侧部分、S2c 的控制台路由 PR）开在各所属仓库，此处登记以保持全局顺序可见。体量风险预案：S1a/S1b/S2a/S4a 单笔可能超上限，施工时按子主题再拆（如 S2a 拆「cwd 注入+出生映射」与「定序+闸门+打点+执行桥」两笔），拆分不改变依赖关系。
+每个 PR 单一主题；变更量建议 1000 行以内，无其他硬约束；行为变化不与结构搬移混排。S 编号即建议的 PR 顺序；跨仓 PR（S2w 控制台路由、S3c、S3d）开在各所属仓库，此处登记以保持全局顺序可见。体量预案：S1a/S1b/S2a/S4a 单笔可能超过建议值，施工时可按子主题再拆（如 S2a 拆「执行桥+出生映射+cwd 注入」与「集成定序+闸门+打点」两笔——出生映射依赖执行桥提供工作区，顺序不可倒），拆分不改变依赖关系。
 
 | 序号 | 标识 | 内容 | 对应任务 | 前置 | 出口检查 | 完成 |
 |---:|---|---|---|---|---|---|
@@ -94,27 +94,27 @@ related_specs:
 | 3 | S1a | `core/workspace/repository.py`：私有仓 + 基线导入（保留路径/排除清单）+ 首层物化与 `scope_base_commit` + 根双引用 | P1.1 | S0b | 基线完整性验收（含用户 `.git`、脏文件、未跟踪文件） | ☐ |
 | 4 | S1b | `core/workspace/scope_tree.py` + `gate.py` + `oplog.py`：作用域账本、两层 epoch、闸门状态机、三阶段 saga | P1.2 | S1a | saga 崩溃注入用例全过（含 GIT_WRITTEN 前判据、分叉即停） | ☐ |
 | 5 | S1c | `core/workspace/manager.py` + `integration.py` + `manifest.py`：worktree 生命周期/GC、串行集成、按路径集成树、两维路径策略；动作/通知协议类型 | P1.3 | S1b | fake 编排经协议建区/集成；四组合路径策略正确 | ☐ |
-| 6 | S1d | `core/checkpoint/store.py` 迁移 + RunStore schema 迁移接线：核心新建 `scope_checkpoints` 表与插件旧表并存（spec §7），检查点类型与持久化顺序的 store 侧支持（生命周期触发接线在 S2a/S1c） | P1.4 | S1b | schema 经 RunStore 管理；并存期插件写入互不干扰；旧表历史行兼容读取 | ☐ |
+| 6 | S1d | `core/checkpoint/store.py` 迁移 + RunStore schema 迁移接线：核心新建 `scope_checkpoints` 表与插件旧表并存（spec §7），检查点类型与持久化顺序的 store 侧支持（生命周期触发接线在 S2a；S1c 与本行并行、不触发尚不存在的 store） | P1.4 | S1b | schema 经 RunStore 管理；并存期插件写入互不干扰；旧表留存零改动（历史行兼容读取器归 S5b） | ☐ |
 | 7 | S2a | Graph 接线：engine cwd/`WORKSPACE_DIR` 注入、executor/verifier 映射 `PrepareScopeWorkspace`、`awaiting_integration` 定序、executor→verifier 闸门、RunCoordinator 生产执行桥（动作协议的生产派发接线） | P2.1 | S1c、S1d | 双节点并行写不相交路径隔离 + 按序集成；verifier 时序正确 | ☐ |
-| 8 | S2b | 两档冲突检测（`git_merge` 默认 / `strict`）+ claims 软预检 + `fault.workspace_conflict`/`fault.scope_quiesce_failed` 入 watchdog 词表 | P2.2 | S2a | git_merge 档可合并放行/真冲突拒绝用例；strict 档全部路径事件对拒绝用例；writer_local 不误报 | ☐ |
-| 9 | S2c | 未合并节点回滚异步状态机：`plan_restore`（含动态子图特例）、作用域动作、driver/op 异步化与 operation_id、内核 CoreAPI scopes/checkpoints/operations 查询与回滚方法（HTTP 路由装配 PR 开在控制台发行包） | P2.3 | S2b | 幂等、旧 epoch 拒绝、失效集外零变化、redo-on-latest-head 语义；target 为子图节点时 generator 置回 passed 不重跑、其子图不废弃、回滚边记在 generator | ☐ |
-| 10 | S3a | watchdog 超时能力：子代理独立计时 + 节点累计超时 `fault.node_timeout`（与 P1/P2 可并行，此处按合入序排列） | P3.1 | S0a | 慢任务与卡死任务均按时告警；暂停不计时、重启保留已用时间 | ☐ |
-| 11 | S3b | 当前文件加载：更新现有 Run 任务定义、保留节点状态与产物、不新建 Run | P3.2 | S2c | 修复后原 Run 加载新定义继续 | ☐ |
-| 12 | S3c | 接入仓：adapter.mjs + opsbot_bridge.py + start_online.py（含定时 tick 与重启恢复核对） | P3.3 | S2c、S3a | 重启恢复原任务，不重复创建 loop/Graph | ☐ |
-| 13 | S3d | RSI 仓：budget.exceeded 分支 + 暂停回调 + policy 中断 + 证据/知识卡片/验证经适配器 + 本地应用候选 | P3.4 | S3c | fault 后远端真实暂停并进入原生诊断 | ☐ |
-| 14 | S3e | e2e 联调与验收：fix-findings 全链路 + 整图完成后从头新一轮 | P3.5 | S3b、S3d | §7 验收标准全过；worktree 成本实测回填 | ☐ |
-| 15 | S4a | dispatch_group + ⑤ 副作用屏障 + 屏障调用链 + 能力矩阵落地（claude SDK 核验，opencode fail-closed） | P4.1 | S3e | 组检查点先于首个副作用；无 cwd 注入拒绝 writer 子代理 | ☐ |
-| 16 | S4b | writer/reader 子代理作用域 + 子代理回滚异步确认链 + ConversationRestorer 迁移提炼 + replay_dispatch 单组限制 | P4.2 | S4a | 定序崩溃注入通过；多副作用组 replay 拒绝 | ☐ |
-| 17 | S4c | 已合并回滚：先校验后 reset + root epoch 传播 + 保守失效 | P4.3 | S4a | 非法目标拒绝后零改动；旧 root epoch 请求被拒 | ☐ |
-| 18 | S5a | 单 session 迁移：作用域树接入 + 终态三方同步 + live view 端点 | P5.1 | S4b | D5 行为与三方同步验收 | ☐ |
-| 19 | S5b | 能力迁移：对话恢复/文件预览/历史检查点/清理/import-db 独立 + 兼容读取器 | P5.2 | S5a | 对外端点等价；重放/import 不回退 | ☐ |
-| 20 | S5c | 删除 `agent_traceback` 插件，snapshot 兼容模式收尾 | P5.3 | S5b 且全部开发完成 | 全量测试与 e2e 通过后插件目录出仓 | ☐ |
+| 8 | S2b | 两档冲突检测（`git_merge` 默认 / `path_set`）+ claims 软预检 + `fault.workspace_conflict`/`fault.scope_quiesce_failed` 入 watchdog 词表 | P2.2 | S2a | git_merge 档可合并放行/真冲突拒绝用例；path_set 档全部路径事件对拒绝用例；writer_local 不误报 | ☐ || 9 | S2c | 未合并节点回滚异步状态机：`plan_restore`（含动态子图特例）、作用域动作、driver/op 异步化与 operation_id、内核 CoreAPI scopes/checkpoints/operations 查询与回滚方法（HTTP 路由装配在 S2w，控制台发行包） | P2.3 | S2b | 幂等、旧 epoch 拒绝、失效集外零变化、redo-on-latest-head 语义；rollback_to 验收失败回滚按 §9.1 编排语义执行（目标既有集成成果保留、不撤文件）；target 为子图节点时 generator 置回 passed 不重跑、其子图不废弃、回滚边记在 generator | ☐ |
+| 10 | S2w | 控制台发行包：scopes/checkpoints/operations 查询与 driver/op 异步回滚的 HTTP 路由装配（薄 handler 走 CoreAPI） | P2.3 | S2c | 端点可达；适配器可经 `GET .../operations/{id}` 轮询回滚状态 | ☐ |
+| 11 | S3a | watchdog 超时能力：子代理独立计时 + 节点累计超时 `fault.node_timeout`（与 P1/P2 可并行，此处按合入序排列） | P3.1 | S0a | 慢任务与卡死任务均按时告警；暂停不计时、重启保留已用时间 | ☐ |
+| 12 | S3b | 当前文件加载：更新现有 Run 任务定义、保留节点状态与产物、不新建 Run | P3.2 | S2c | 修复后原 Run 加载新定义继续 | ☐ |
+| 13 | S3c | 接入仓：adapter.mjs + opsbot_bridge.py + start_online.py（含定时 tick 与重启恢复核对） | P3.3 | S2w、S3a | 重启恢复原任务，不重复创建 loop/Graph | ☐ |
+| 14 | S3d | RSI 仓：budget.exceeded 分支 + 暂停回调 + policy 中断 + 证据/知识卡片/验证经适配器 + 本地应用候选 | P3.4 | S3c | fault 后远端真实暂停并进入原生诊断 | ☐ |
+| 15 | S3e | e2e 联调与验收：fix-findings 全链路 + 整图完成后从头新一轮（e2e 测试代码在本仓 `tests/e2e/`，联调跨仓） | P3.5 | S3b、S3d | §7 验收标准全过；worktree 成本实测回填 | ☐ |
+| 16 | S4a | dispatch_group + ⑤ 副作用屏障 + 屏障调用链 + 能力矩阵落地（claude SDK 核验，opencode fail-closed） | P4.1 | S3e | 组检查点先于首个副作用；无 cwd 注入拒绝 writer 子代理 | ☐ |
+| 17 | S4b | writer/reader 子代理作用域 + 子代理回滚异步确认链 + ConversationRestorer 迁移提炼 + replay_dispatch 单组限制 | P4.2 | S4a | 定序崩溃注入通过；多副作用组 replay 拒绝 | ☐ |
+| 18 | S4c | 已合并回滚：先校验后 reset + root epoch 传播 + 保守失效 | P4.3 | S4a | 非法目标拒绝后零改动；旧 root epoch 请求被拒 | ☐ |
+| 19 | S5a | 单 session 迁移：作用域树接入 + 终态三方同步 + live view 端点 | P5.1 | S4b | D5 行为与三方同步验收 | ☐ |
+| 20 | S5b | 能力迁移：对话恢复/文件预览/历史检查点/清理/import-db 独立 + 兼容读取器（旧 `checkpoints` 表历史行读取在此实现，S1d 只保证旧表留存） | P5.2 | S5a | 对外端点等价；重放/import 不回退 | ☐ |
+| 21 | S5c | 删除 `agent_traceback` 插件，snapshot 兼容模式收尾 | P5.3 | S5b 且全部开发完成 | 全量测试与 e2e 通过后插件目录出仓 | ☐ |
 
 ### 4.1 里程碑出口
 
 - **M0（P0）**：协议冻结；spike 五项指标有结论，路径策略最终取值落档。
 - **M1（P1）**：临时仓上基线含未提交+未跟踪+内部 git 保留路径；作用域 CRUD/epoch/幂等/闸门单测通过；fake 编排经协议建区/集成；saga 三阶段崩溃注入通过。
-- **M2（P2）**：双节点并行写不相交路径隔离+按序集成；git_merge 档同文件不相交 hunk 并行写自动合并放行、真实合并冲突检出，strict 档同文件并行写（含 Git 可自动合并）检出；writer_local 修改不误报冲突；异步回滚幂等、旧 epoch 回执被拒、失效集外零变化；旧单 session 与插件路径零改动。
+- **M2（P2）**：双节点并行写不相交路径隔离+按序集成；git_merge 档同文件不相交 hunk 并行写自动合并放行、真实合并冲突检出，path_set 档同文件并行写（含 Git 可自动合并）检出；writer_local 修改不误报冲突；异步回滚幂等、旧 epoch 回执被拒、失效集外零变化；验收失败回滚不撤已集成成果（spec §9）；动态子图回滚特例符合 spec §9.1.1；旧单 session 与插件路径零改动。
 - **M3（P3）**：fix-findings e2e 跑通（超时→暂停→导出→修复→异步回滚→resume→下游继续）；重复回滚幂等；worktree 实际成本评估完成，P4/P5 节奏据此确认。
 - **M4（P4）**：规格 §17.1 第 8/23/24/28/31–35 项验收通过；无 cwd 注入 runtime 上 writer 子代理被拒绝启动；已合并回滚后旧 root epoch 请求被拒、reset 目标为集成线祖先；失效范围 = 组检查点之后全部。
 - **M5（P5）**：全部现有对外端点有主 Web 等价物；单 session 重放/import 迁移前后两点不回退；全部开发完成且全量测试与 e2e 通过后，`agent_traceback` 目录删除退役。
@@ -133,24 +133,26 @@ related_specs:
 ## 5. 依赖与关键路径
 
 ```text
-S0a 协议冻结
-    ↓
-S0b 量化 spike ────────────────────→ S3a 超时能力（与 P1/P2 并行）─┐
-    ↓                                                              │
+S0a 协议冻结 ─────────────────────────────────────→ S3a 超时能力（与 P1/P2 并行）
+    ↓                                                             │
+S0b 量化 spike                                                    │
+    ↓                                                             │
 S1a 私有仓/基线 → S1b 账本/闸门/oplog → S1c 工作区/集成 → S1d 检查点迁移
                                                             ↓
                                           S2a Graph 接线 → S2b 冲突检测 → S2c 异步回滚
                                                                           ↓     │
                                             ┌─────────────────────────────┤     │
-                                            ↓                             ↓     │
-                                          S3b 当前文件加载          S3c 适配器/启动脚本 ←┘
-                                            │                             ↓
-                                            │                       S3d RSI 侧信号与验证
-                                            └─────────────┬───────────────┘
+                                            ↓                             ↓     ↓
+                                          S3b 当前文件加载          S2w 控制台路由 → S3c 适配器/启动脚本
+                                            │                                        ↓
+                                            │                                  S3d RSI 侧信号与验证
+                                            └─────────────┬──────────────────────────┘
                                                           ↓
-                                          S3e fix-findings e2e（M3）
+                                          S3e fix-findings e2e（M3，本仓 tests/e2e/）
                                                           ↓
-                                          S4a dispatch_group+屏障 → S4b 子代理回滚 → S4c 已合并回滚
+                                          S4a dispatch_group+屏障 ──────→ S4c 已合并回滚
+                                                          ↓
+                                          S4b 子代理回滚
                                                           ↓
                                           S5a 单 session 迁移 → S5b 能力迁移 → S5c 删插件
 ```
@@ -174,7 +176,7 @@ D7 双轨（opencode 上游推动 + 宿主接管 task 工具 spike）与 P4 并�
 - [ ] 规格 §17.1 关键验收清单第 1–37 项全部通过（各阶段对应项随里程碑验收）。
 - [ ] fix-findings e2e：超时 → 暂停 → 导出 → 修复 → 回滚 → resume → 下游继续；候选在同时限内完成原验收；整图完成后用修复后源码从头开始下一轮。
 - [ ] 重复事件不重复回滚；旧代事件不改变新代；恢复文件后节点状态与文件一致；候选测试通过后主图真实继续。
-- [ ] 关闭 traceback 时拒绝文件回滚；开启后可恢复纯节点起点；并行任务按检查点重置；存在中间产物时退到安全起点或明确拒绝。
+- [ ] 关闭 traceback 时拒绝文件回滚；开启后可恢复纯节点起点；并行任务按检查点重置；存在中间产物（writer_local/rebuildable）时按 traceback 规格 §6.2 路径策略恢复，无法确定性重建则明确拒绝。
 - [ ] 每个阶段都有可回滚路径，旧单 session 与插件路径在 P5 前零改动。
 
 ## 8. 进度记录
@@ -183,3 +185,4 @@ D7 双轨（opencode 上游推动 + 宿主接管 task 工具 spike）与 P4 并�
 |---|---|---|---|
 | 2026-11-23 | 创建 ADR-0001、双 spec 与本计划 | `docs/adr`、`docs/specs`、`docs/plans` 下四份文档 | S0a 评审中 |
 | 2026-11-24 | S0a 首轮评审意见落档：检查点核心/插件分表（spec §7）、控制台发行包登记（§2/P2.3/S2c）、RunCoordinator 生产执行桥归属（P2.1/S2a）、引用与状态口径修订（B1–B4）；冲突检测档位化 `conflict_policy`（ADR D9 + spec §8） | 同上 | 等待评审关闭 |
+| 2026-11-24 | S0a 二轮评审落档：N1 验收失败回滚语义明写（spec §9 + 验收 #38）；S2w 控制台路由行登记（S3c 前置改为 S2w）；依赖图修正（S0a→S3a、S4c 并立 S4a）；`strict` 档更名 `path_set`；claims 与 git_merge 倒挂消除（§8.3）；体量约束放宽为建议 1000 行以内；RSI spec 三处旧口径同步 | 同上 | 等待评审关闭 |
