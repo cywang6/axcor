@@ -90,7 +90,7 @@ related_specs:
 | 序号 | 标识 | 内容 | 对应任务 | 前置 | 出口检查 | 完成 |
 |---:|---|---|---|---|---|---|
 | 1 | S0a | 文档集评审定稿（ADR-0001 + 双 spec + 本计划），协议冻结 | P0.1 | — | 评审通过 | ☑ |
-| 2 | S0b | 量化 spike 脚本与执行：fix-findings 真实目录五项指标测量，结论回填 ADR-0001 | P0.2 | S0a | 指标可接受或路径策略调整结论落档 | ☐ |
+| 2 | S0b | 量化 spike 脚本与执行：fix-findings 真实目录五项指标测量，结论回填 ADR-0001 | P0.2 | S0a | 指标可接受或路径策略调整结论落档 | ☑ |
 | 3 | S1a | `core/workspace/repository.py`：私有仓 + 基线导入（保留路径/排除清单）+ 首层物化与 `scope_base_commit` + 根双引用 | P1.1 | S0b | 基线完整性验收（含用户 `.git`、脏文件、未跟踪文件） | ☐ |
 | 4 | S1b | `core/workspace/scope_tree.py` + `gate.py` + `oplog.py`：作用域账本、两层 epoch、闸门状态机、三阶段 saga | P1.2 | S1a | saga 崩溃注入用例全过（含 GIT_WRITTEN 前判据、分叉即停） | ☐ |
 | 5 | S1c | `core/workspace/manager.py` + `integration.py` + `manifest.py`：worktree 生命周期/GC、串行集成、按路径集成树、两维路径策略；动作/通知协议类型 | P1.3 | S1b | fake 编排经协议建区/集成；四组合路径策略正确 | ☐ |
@@ -193,3 +193,4 @@ D7 双轨（opencode 上游推动 + 宿主接管 task 工具 spike）与 P4 并�
 | 2026-11-24 | 补选择性保留（换序重放）安全性论证与边界（spec §9.2.1，回应「并行写者同基线、回滚先到者是否拖累后到者」）；ADR D3 行注明升级路径 | 同上 | 等待评审关闭 |
 | 2026-11-24 | D3 改写（需求方确认）：第一版即选择性保留——失效集按基线谱系计算、保留者按原集成序换序重放；spec §9 表/§9.2 流程/§9.2.1 转为正式机制、验收 #7，ADR D3 与主决策，plan P4.3/S4c/M4 同步 | 同上 | 等待评审关闭 |
 | 2026-11-24 | **S0a 关闭**：三轮评审落档，ADR/双 spec 状态推进 Frozen，协议进入实现阶段；下一笔 S0b 量化 spike | 同上 | S0b 待 fix-findings 真实目录 |
+| 2026-11-24 | S0b 完成：量化 spike 脚本入仓并附冒烟测试；真实目录不在本机，经需求方确认改用同画像合成目录（构建产物 1 GiB/2000 文件、源码 4000 文件、用户仓 `.git` 64 MB、每轮刷新 25%）。五项指标：基线导入 34 s、worktree 建区 1.2 s、checkpointed 打点每轮 6 s 与磁盘 +240 MB（排除产物对照 0.19 s/+0.1 MB）、回滚恢复 2.5 s（废弃重建 4.5 s）、下游继承物化 2.8–3.6 s。结论：GB 级构建产物维持 `writer_local + rebuildable` 不进检查点提交，全链磁盘约为目录本体 5 倍，已回填决策记录备注 | `scripts/workspace_scope_spike.py`、`tests/test_workspace_scope_spike.py`、`docs/adr/0001-worktree-scope-tree-unified-rollback.md` | S1a 可开工 |
