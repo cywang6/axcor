@@ -4,7 +4,7 @@ title: "ADR-0001：采用 git worktree 写者作用域树实现工作区隔离�
 status: Accepted
 owner: "chenyangwang"
 created: 2026-11-23
-updated: 2026-11-23
+updated: 2026-11-24
 related_specs:
   - docs/specs/traceback-workspace-rollback.md
   - docs/specs/rsi-online-repair-loop.md
@@ -38,7 +38,7 @@ Accepted（2026-11-23）。协议已冻结，进入实现阶段。
 
 - **统一写者作用域树**：Graph Run 与独立单 session 共用同一模型——集成根作用域 → 主写者作用域（节点 executor / 单 session 主 agent）→ 子代理作用域。每个可能写文件的执行单元默认拥有独立 worktree；子代理完成时在父作用域写入闸门内、结果交付前合并回父作用域；Graph 节点验收通过并集成成功后才算 `passed`。
 - **回滚 = 异步确认链上的作用域操作组合**：节点回滚与子代理回滚共用同一异步动作/通知确认链与通用 `plan_restore`，由 `AbandonScope` / `RestoreScope` / `PrepareScopeWorkspace` 组合完成。未合并节点回滚 = 废弃目标作用域并在**当前集成头**重建（redo on latest integration head），严格局部（目标 scope epoch+1）；已合并回滚 = 集成线回退 + root epoch 递增的保守失效。崩溃恢复按三阶段 saga + 三态核对：**分叉即停，绝不自动 reset**。
-- **冲突检测以路径集重叠为准**：任何两个并发写者对同一 merge 路径的修改（无论 Git 能否自动合并）都判违规，发 `fault.workspace_conflict`；公共基准为各作用域的 `integration_base_commit`（不是含物化产物的 `scope_base_commit`），且限定 merge 路径集，杜绝本地产物误报。
+- **冲突检测档位化，默认以可合并性为准**：配置项 `conflict_policy` 两档——`git_merge`（默认）下两个并发写者改同一 merge 路径、但三方合并干净（如一方改文件上半、另一方改下半）即放行，只有真实合并冲突才发 `fault.workspace_conflict`；`strict` 档退化为路径集重叠即违规（无论 Git 能否自动合并）。公共基准为各作用域的 `integration_base_commit`（不是含物化产物的 `scope_base_commit`），且限定 merge 路径集，杜绝本地产物误报。
 - **写入静止缩小为单作用域局部闸门**：RUNNING→QUIESCING→QUIESCED→操作→RUNNING；多数时点由「父 agent 停在 tool 调用上」结构性保证，仅后台进程需有界排空；父阻塞在 task result 上时不得延迟集成，超时以 `fault.scope_quiesce_failed` 收口，父 agent 绝不无限等待。
 - **能力迁入主代码，插件分阶段退出**：新增 `core/workspace/`、`core/checkpoint/`、`core/restore/` 与通用动作/通知协议；迁移期插件经 SDK 端口调用核心（不 import `core`，遵守架构门禁）；`agent_traceback` 在全部开发完成、既有用户能力迁移完毕且测试通过后才退役删除，`file_provenance` 不在删除范围。
 - **实施顺序**：Graph 节点级垂直切片与 RSI fix-findings 闭环先行（P0–P3），dispatch_group + 子代理回滚 + 已合并回滚其次（P4），单 session 迁移与插件退出最后（P5）。首期 fix-findings 节点无内部子代理，不需要先实现子代理能力。
@@ -55,6 +55,7 @@ Accepted（2026-11-23）。协议已冻结，进入实现阶段。
 | D6 私有仓历史视图 | **默认单基线提交**（agent 的 `git log` 不见原项目历史）；需要历史的工作流可选开启只读历史导入 |
 | D7 无屏障 runtime 的落地路线 | **双轨并行**：claude SDK 路径先行 + opencode 上 writer 子代理 fail-closed（拒绝启动）；同时推动上游 pre-spawn hook，并评估宿主接管 task 工具 |
 | D8 隔离强度定位 | **协作式 + 审计**：防误操作与可归因为主（信任自派 agent），`file_provenance` 审计跨边界写；OS 级硬隔离（只读挂载/沙箱）为后续可选强化，不在第一版 |
+| D9 冲突检测默认档 | **git_merge（可合并性为准）**：同一文件被双方修改但三方合并干净即放行；`strict` 档保留「路径集重叠即违规」的硬保证，供需要「并发单元不得改同一文件」强约束的场景显式开启 |
 
 ## 被否决的方案
 
@@ -71,7 +72,7 @@ C/D 同样可以对 overlay 上层或每写者副本做路径 diff 与写者归�
 
 ### 正面
 
-- 运行期写隔离 + 路径集冲突检测 + 作用域级局部回滚，「并发单元不改同一文件」从口头约定变为可检测、可报错的执行时保证。
+- 运行期写隔离 + 档位化冲突检测 + 作用域级局部回滚：默认 `git_merge` 档放行可自动合并的同文件并行写、只对真实合并冲突报错；`strict` 档下「并发单元不改同一文件」从口头约定变为可检测、可报错的执行时保证。
 - 回滚边界干净：未合并回滚不触碰其他作用域；「文件检查点与对话边界表示同一逻辑时刻」由 dispatch_group 组检查点保证。
 - 文件归属天然可得：每次进入父树的 merge-path diff 就是该写者的产出清单。
 - 不要求全局静止，只要求单作用域局部静止。
@@ -86,4 +87,5 @@ C/D 同样可以对 overlay 上层或每写者副本做路径 diff 与写者归�
 
 ## 备注
 
+- 冲突检测档位（D9）为 2026-11-24 修订：初版只有「路径集重叠即违规」一档，默认过严（同文件不相交区域的并行修改被误伤）；默认档改为 `git_merge` 后，初版语义保留为 `strict` 档。
 - 构建产物路径策略（`op/build/**` 等）的最终取值以量化 spike 结论为准；spike 指标不可接受时相应路径改 `rebuildable` 或评估内容寻址产物仓 / reflink，本决策其余部分不变。

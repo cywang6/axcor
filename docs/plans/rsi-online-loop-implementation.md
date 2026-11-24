@@ -45,7 +45,7 @@ related_specs:
 |---|---|---|---|---|
 | P1.1 | `core/workspace/repository.py`：私有仓布局、基线导入（脏文件+未跟踪+内部 git 保留路径+排除清单防递归）、首层物化与 `scope_base_commit`、`root_seed_checkpoint`/`root_integration_head` | Repository 模块 + 单测 | P0.2 | 含未提交/未跟踪/用户 `.git` 的目录建区基线逐字节一致；用户仓 refs/HEAD/index/hooks 未改；根目录无 OpsBot git 元数据 |
 | P1.2 | `core/workspace/scope_tree.py`（作用域账本 + 两层 epoch）+ `core/workspace/gate.py`（闸门状态机）+ `core/workspace/oplog.py`（三阶段 saga） | 账本/闸门/oplog + 单测 | P1.1 | 作用域 CRUD/epoch 幂等单测；闸门状态机与降级分支单测；saga 三阶段崩溃注入（含 GIT_WRITTEN 前判据、分叉即停不 reset） |
-| P1.3 | `core/workspace/manager.py`（worktree 生命周期、物化、GC）+ `core/workspace/integration.py`（串行集成 + 按路径集成树）+ 通用动作/通知协议类型 + `core/workspace/manifest.py`（两维路径策略） | 工作区/集成/manifest + 单测 | P1.2 | fake 编排经协议建区/集成；四组合路径策略行为正确；writer_local 不误报冲突 |
+| P1.3 | `core/workspace/manager.py`（worktree 生命周期、物化、GC）+ `core/workspace/integration.py`（串行集成 + 按路径集成树，相交路径按 `conflict_policy` 档位处理：git_merge 走 merge-tree 三方合并、strict 在 P2.2 拒绝）+ 通用动作/通知协议类型 + `core/workspace/manifest.py`（两维路径策略） | 工作区/集成/manifest + 单测 | P1.2 | fake 编排经协议建区/集成；四组合路径策略行为正确；writer_local 不误报冲突 |
 | P1.4 | `core/checkpoint/store.py` 迁移（自插件 CheckpointStore），schema 经 RunStore 统一迁移管理；检查点类型 `scope_start`/`terminal` 与持久化顺序（编排状态→文件 commit→检查点行→发布） | CheckpointStore + 迁移单测 | P1.2 | schema 由 RunStore 迁移管理；旧检查点行兼容读取 |
 
 ### P2：Graph 节点级垂直切片（旧单 session 与插件路径不动）
@@ -53,7 +53,7 @@ related_specs:
 | ID | 任务 | 产出 | 依赖 | 验收 |
 |---|---|---|---|---|
 | P2.1 | graph engine cwd 注入（7 处 `cwd=self._work_dir` 改为作用域工作区 + `WORKSPACE_DIR` 注入）；节点 executor/verifier 出生映射 `PrepareScopeWorkspace`；`awaiting_integration` 定序 + executor→verifier 闸门；`scope_start`/`terminal` 打点接线 | Graph 接线 + 集成测试 | P1.3、P1.4 | 双节点并行写不相交路径隔离 + 按序集成；验收通过 ≠ 集成完成（`awaiting_integration` 居中）；executor 后台写未静止前 verifier 不得启动 |
-| P2.2 | 路径集冲突检测（全部事件对，以 `integration_base_commit` 为基准、限定 merge 路径集）+ claims 软预检 + `fault.workspace_conflict` 入 watchdog 词表 | 冲突检测 + 单测/集成测试 | P2.1 | 同文件并行写（含 Git 可自动合并）被检出；writer 修改 writer_local 路径、父树无变化时不误报；载荷含冲突路径与双方身份 |
+| P2.2 | 两档冲突检测（`conflict_policy`：`git_merge` 默认 = 以 `integration_base_commit` 为基准、限定 merge 路径集求交后走 merge-tree 可合并性判定；`strict` = 路径集重叠即拒绝，覆盖全部事件对）+ claims 软预检 + `fault.workspace_conflict` 入 watchdog 词表 | 冲突检测 + 单测/集成测试 | P2.1 | git_merge 档同文件不相交 hunk 并行写自动合并放行、真实合并冲突检出；strict 档同文件并行写（含 Git 可自动合并）检出；writer 修改 writer_local 路径、父树无变化时不误报；载荷含冲突路径与双方身份 |
 | P2.3 | 未合并节点回滚异步状态机：通用 `plan_restore`（既有 `plan_rollback` 变为其调用方之一，并保留动态子图特例——target 为子图节点时父 generator 进新回滚代但立即置回 passed、不重新编排、其子图不废弃、回滚边记在 generator）、`AbandonScope`/`RestoreScope`/`PrepareScopeWorkspace` 动作、driver/op 异步化（op 只登记 `pending_rollback` 返回 operation_id）、`GET .../scopes`、`GET .../checkpoints`、`GET .../operations/{id}` 端点 | 异步回滚 + Web 端点 + 集成测试 | P2.2 | op 立即返回 operation_id；回滚幂等、旧 epoch 回执被拒、失效集外零变化；兄弟已集成时新基线含其成果（redo on latest integration head）；generator 特例符合 spec §9.1.1 |
 
 ### P3：RSI fix-findings 闭环
@@ -95,7 +95,7 @@ related_specs:
 | 5 | S1c | `core/workspace/manager.py` + `integration.py` + `manifest.py`：worktree 生命周期/GC、串行集成、按路径集成树、两维路径策略；动作/通知协议类型 | P1.3 | S1b | fake 编排经协议建区/集成；四组合路径策略正确 | ☐ |
 | 6 | S1d | `core/checkpoint/store.py` 迁移 + RunStore schema 迁移接线 + `scope_start`/`terminal` 打点与持久化顺序 | P1.4 | S1b | schema 经 RunStore 管理；旧行兼容读取 | ☐ |
 | 7 | S2a | Graph 接线：engine cwd/`WORKSPACE_DIR` 注入、executor/verifier 映射 `PrepareScopeWorkspace`、`awaiting_integration` 定序、executor→verifier 闸门 | P2.1 | S1c、S1d | 双节点并行写不相交路径隔离 + 按序集成；verifier 时序正确 | ☐ |
-| 8 | S2b | 路径集冲突检测 + claims 软预检 + `fault.workspace_conflict`/`fault.scope_quiesce_failed` 入 watchdog 词表 | P2.2 | S2a | 全部路径事件对拒绝用例；writer_local 不误报 | ☐ |
+| 8 | S2b | 两档冲突检测（`git_merge` 默认 / `strict`）+ claims 软预检 + `fault.workspace_conflict`/`fault.scope_quiesce_failed` 入 watchdog 词表 | P2.2 | S2a | git_merge 档可合并放行/真冲突拒绝用例；strict 档全部路径事件对拒绝用例；writer_local 不误报 | ☐ |
 | 9 | S2c | 未合并节点回滚异步状态机：`plan_restore`（含动态子图特例）、作用域动作、driver/op 异步化与 operation_id、scopes/checkpoints/operations 查询端点 | P2.3 | S2b | 幂等、旧 epoch 拒绝、失效集外零变化、redo-on-latest-head 语义；target 为子图节点时 generator 置回 passed 不重跑、其子图不废弃、回滚边记在 generator | ☐ |
 | 10 | S3a | watchdog 超时能力：子代理独立计时 + 节点累计超时 `fault.node_timeout`（与 P1/P2 可并行，此处按合入序排列） | P3.1 | S0a | 慢任务与卡死任务均按时告警；暂停不计时、重启保留已用时间 | ☐ |
 | 11 | S3b | 当前文件加载：更新现有 Run 任务定义、保留节点状态与产物、不新建 Run | P3.2 | S2c | 修复后原 Run 加载新定义继续 | ☐ |
@@ -113,7 +113,7 @@ related_specs:
 
 - **M0（P0）**：协议冻结；spike 五项指标有结论，路径策略最终取值落档。
 - **M1（P1）**：临时仓上基线含未提交+未跟踪+内部 git 保留路径；作用域 CRUD/epoch/幂等/闸门单测通过；fake 编排经协议建区/集成；saga 三阶段崩溃注入通过。
-- **M2（P2）**：双节点并行写不相交路径隔离+按序集成；同文件并行写（含 Git 可自动合并）被检出；writer_local 修改不误报冲突；异步回滚幂等、旧 epoch 回执被拒、失效集外零变化；旧单 session 与插件路径零改动。
+- **M2（P2）**：双节点并行写不相交路径隔离+按序集成；git_merge 档同文件不相交 hunk 并行写自动合并放行、真实合并冲突检出，strict 档同文件并行写（含 Git 可自动合并）检出；writer_local 修改不误报冲突；异步回滚幂等、旧 epoch 回执被拒、失效集外零变化；旧单 session 与插件路径零改动。
 - **M3（P3）**：fix-findings e2e 跑通（超时→暂停→导出→修复→异步回滚→resume→下游继续）；重复回滚幂等；worktree 实际成本评估完成，P4/P5 节奏据此确认。
 - **M4（P4）**：规格 §17.1 第 8/23/24/28/31–35 项验收通过；无 cwd 注入 runtime 上 writer 子代理被拒绝启动；已合并回滚后旧 root epoch 请求被拒、reset 目标为集成线祖先；失效范围 = 组检查点之后全部。
 - **M5（P5）**：全部现有对外端点有主 Web 等价物；单 session 重放/import 迁移前后两点不回退；全部开发完成且全量测试与 e2e 通过后，`agent_traceback` 目录删除退役。

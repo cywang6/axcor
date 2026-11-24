@@ -218,7 +218,7 @@ Graph 映射（住在 graph 插件内）：executor 出生 → `PrepareScopeWork
 | WorkspaceManager | `core/workspace/manager.py` 新增 | worktree 生命周期、物化、GC | 新写 |
 | Gate | `core/workspace/gate.py` 新增 | 闸门状态机 | 新写 |
 | Repository | `core/workspace/repository.py` 新增 | 私有仓、基线导入、首层物化与 `scope_base_commit` | 自 SnapshotEngine 提炼 |
-| IntegrationCoordinator | `core/workspace/integration.py` 新增 | 集成线、串行集成、按路径集成树、路径集冲突、集成线回退 | 新写 |
+| IntegrationCoordinator | `core/workspace/integration.py` 新增 | 集成线、串行集成、按路径集成树、两档冲突检测（§8.1）、集成线回退 | 新写 |
 | Manifest | `core/workspace/manifest.py` 新增 | 两维路径策略、物化/重建脚本登记、`inherit_from` 绑定 | 新写 |
 | oplog | `core/workspace/oplog.py` 新增 | 持久化操作状态机（§11） | 新写 |
 | CheckpointStore | `core/checkpoint/store.py` 迁移 | 检查点账本；schema 经 RunStore 统一迁移管理 | 插件迁移 |
@@ -275,8 +275,8 @@ stateDiagram-v2
     [*] --> Preparing: PrepareScopeWorkspace（父闸门确认静止）
     Preparing --> Active: worktree 建立成功（失败即 fail-fast）
     Active --> AwaitingIntegration: 验收通过（Graph）或子代理/session 完成
-    AwaitingIntegration --> Integrated: 闸门 + 路径集预检通过 + 串行集成成功
-    AwaitingIntegration --> Conflicted: 路径集重叠或闸门失败降级待定
+    AwaitingIntegration --> Integrated: 闸门 + 冲突预检通过（§8.1 档位）+ 串行集成成功
+    AwaitingIntegration --> Conflicted: strict 档路径集重叠 / git_merge 档合并冲突 / 闸门失败降级待定
     Integrated --> Released: 立即释放（默认）或保留窗口后释放
     Active --> Discarded: 未合并回滚 / 重试且基线变化（scope epoch+1）
     Released --> [*]: worktree prune
@@ -316,7 +316,7 @@ stateDiagram-v2
 | `writer_local` + `rebuildable` | ✗ | ✗ | 留空，执行重建脚本 | 重跑重建脚本 |
 | `shared_*` / `external` | ✗ | ✗ | 符号链接 / 不处理 | 租约回收 + 外部重建协议 |
 
-集成用**按路径构造集成树**：`git diff integration_base_commit..head -- <merge 路径集>` 生成补丁，在父闸门内应用到父树并提交；`writer_local + checkpointed` 路径永远留在作用域分支与检查点里，不进集成 diff。
+集成用**按路径构造集成树**：`git diff integration_base_commit..head -- <merge 路径集>` 生成补丁，在父闸门内应用到父树并提交；路径集相交时按 §8.1 档位处理（`git_merge` 档对相交路径取 merge-tree 三方合并结果入集成树，`strict` 档已在冲突检测拒绝、到不了本步）；`writer_local + checkpointed` 路径永远留在作用域分支与检查点里，不进集成 diff。
 
 **作用域的两个基线字段**（职责严格分离）：
 
@@ -426,28 +426,39 @@ CREATE TABLE IF NOT EXISTS scopes (
 
 `scope_epoch` 标识「这个作用域的第几代实例」，旧回执按 `(scope_id, scope_epoch)` 拒绝；`root_epoch` 只在集成线回退时递增，拒绝基于失效基线的集成与回滚请求。回滚请求的 `expected_epoch` 按操作对象取对应层。
 
-## 8. 冲突检测：路径集重叠，而非 merge 冲突
+## 8. 冲突检测：默认可合并性为准，strict 档按路径集重叠
 
-### 8.1 硬保证：路径集判定（闸门内执行）
+### 8.1 硬保证：两档判定（闸门内执行）
 
-「并发单元不得改同一文件」与 Git 能否自动合并无关。判定（全部在父作用域闸门内，扫描与 merge 之间无竞态）：
+冲突判定由配置项 `traceback.workspace.conflict_policy` 选档（§15），按集成根生效：
+
+- `git_merge`（默认）：以 Git 三方合并结果为准——同一 merge 路径被双方修改、但合并干净（hunk 不相交，如一方改文件上半、另一方改下半）即放行；只有真实合并冲突才发 `fault.workspace_conflict`。
+- `strict`：路径集重叠即违规——任何两个并发写者改同一 merge 路径（无论 Git 能否自动合并）都拒绝，适用于「并发单元不得改同一文件」需硬保证的场景。
+
+判定（全部在父作用域闸门内，扫描与 merge 之间无竞态）：
 
 ```text
 [闸门] 冻结父作用域 → 提交父未提交修改（parent_head 前进到工作树实际状态）→ 确认 clean
 R = 本作用域的 integration_base_commit（不是含物化产物的 scope_base_commit）
 writer_paths = pathset(diff(R, writer_head))  ∩ merge 路径集
 parent_paths = pathset(diff(R, parent_head))  ∩ merge 路径集
-writer_paths ∩ parent_paths ≠ ∅ → fault.workspace_conflict（集成不发生）
-∅ → 按路径构造集成树（base = R）应用 merge 路径 diff → 发布 → 解冻
+overlap = writer_paths ∩ parent_paths
+overlap = ∅            → 按路径构造集成树（base = R）应用 merge 路径 diff → 发布 → 解冻
+overlap ≠ ∅ 且 strict  → fault.workspace_conflict（集成不发生）
+overlap ≠ ∅ 且 git_merge → 对 overlap 路径做三方合并（git merge-tree，base = R）：
+    合并干净 → 合并结果随集成树一并提交 → 发布 → 解冻
+    合并冲突 → fault.workspace_conflict（集成不发生）
 ```
 
 同一公式覆盖三个冲突来源：并行子代理互撞（parent_paths 含先到者已合入的 diff）；父后台写入与子代理撞（闸门内落账的父写入）；Graph 并行节点撞（节点集成时 parent_paths = 建区时 root_integration_head 之后的集成线变化）。
 
-必须覆盖的路径事件（路径出现于双侧变更集即命中，全部拒绝）：modify/modify（即使 hunk 不重叠、Git 可自动合并）、add/add（即使内容相同）、delete/modify、delete/delete 后重建、rename（按旧删+新增计）、目录/文件替换、symlink 与普通文件互换、类型/模式变化。
+`strict` 档必须覆盖的路径事件（路径出现于双侧变更集即命中，全部拒绝）：modify/modify（即使 hunk 不重叠、Git 可自动合并）、add/add（即使内容相同）、delete/modify、delete/delete 后重建、rename（按旧删+新增计）、目录/文件替换、symlink 与普通文件互换、类型/模式变化。
 
-`git merge-tree` 只在路径集预检通过后作可合并性检查，不承担「是否同文件」判定。符号链接目标内容的修改不经过任何 writer 的 git diff，共享路径靠 §8.2 强制手段。
+`git_merge` 档下同一事件集由 merge-tree 判定：modify/modify 不相交 hunk 放行、相交即冲突；add/add 内容相同放行、不同即冲突；delete/modify、delete/delete 后重建、rename 交叉、目录/文件替换、symlink 与普通文件互换、类型/模式变化等 Git 判冲突的事件照常拒绝。
 
-fault payload：冲突路径、双方身份、双侧 commit、共同基线。冲突策略：`fail_unit`（执行单元 failed，进重试/回滚预算）或 `pause_for_repair`（Run 暂停等修复）。
+`git merge-tree` 的角色随档位变化：`git_merge` 档它是「同文件是否冲突」的判定器与合并内容生成器；`strict` 档它只在路径集预检通过后作可合并性检查，不承担「是否同文件」判定。符号链接目标内容的修改不经过任何 writer 的 git diff，共享路径靠 §8.2 强制手段。
+
+fault payload：冲突路径、双方身份、双侧 commit、共同基线（`git_merge` 档冲突路径以 merge-tree 报告为准）。冲突策略：`fail_unit`（执行单元 failed，进重试/回滚预算）或 `pause_for_repair`（Run 暂停等修复）。
 
 ### 8.2 共享路径
 
@@ -689,7 +700,7 @@ fix-findings 案例在本模型下的行为：
 | `$WORK_DIR/op/build/` 旧打包产物 | `writer_local + rebuildable`（确定性重建脚本 + 验收；无法保证则改 `checkpointed`） |
 | 节点超时 → 回滚 → resume | §9.1 异步状态机（第一版验证路径） |
 | CANN/GEIR 探测读外部安装 | `external`：固定脚本重建核对 |
-| 上游与 fix-findings 并行写 `CODE_REVIEW.md` | claims 预检拒绝；漏声明则集成时路径集命中 |
+| 上游与 fix-findings 并行写 `CODE_REVIEW.md` | claims 预检拒绝；漏声明则集成时按 §8.1 档位判定：默认 `git_merge` 档三方合并干净即放行、真冲突才报错；`strict` 档路径集命中即拒绝 |
 
 ## 15. 配置面
 
@@ -708,6 +719,8 @@ traceback:
     root: ""
     retain_after_merge: false
     history_import: off          # off（默认，D6）| readonly
+    conflict_policy: git_merge   # git_merge（默认，D9）：三方合并干净即放行、真冲突报错
+                                 # | strict：路径集重叠即 fault.workspace_conflict
     manifest:
       merge: []
       writer_local: ["**/build/**", "**/__pycache__/**", "**/*.log"]
@@ -758,7 +771,7 @@ traceback:
 ### 17.1 关键验收清单
 
 1. **隔离**：双单元并行写不相交路径互不可见；集成后父树含双方产出。
-2. **冲突（路径集）**：§8.1 全部路径事件对均拒绝；载荷含路径与双方身份。
+2. **冲突（两档）**：`git_merge` 档同文件不相交 hunk 并行写自动合并放行、真实合并冲突拒绝；`strict` 档 §8.1 全部路径事件对均拒绝；载荷含路径与双方身份。
 3. **闸门**：操作期间父作用域静止（结构性断言 + 后台排空注入测试）；不可静止时按父是否阻塞分支处理；绝不在活动脏工作区合并。
 4. **集成定序**：验收通过 → `awaiting_integration` → 集成成功才 `passed`；冲突时未通过。
 5. **路径策略四组合**（§6.2 表）行为正确；缺脚本的 rebuildable 自动按 checkpointed。
@@ -799,7 +812,7 @@ traceback:
 
 | 层 | 内容 | 位置 |
 |---|---|---|
-| 单元 | worktree CRUD、闸门、路径集判定（全事件对）、按路径集成树、四组合、claims、两层 epoch 幂等、saga 崩溃恢复、dispatch_anchor、组仲裁、message 级截断、replay 限制、终态三方同步 | `packages/kernel/kernel_tests/workspace/`、`packages/kernel/kernel_tests/checkpoint/` |
+| 单元 | worktree CRUD、闸门、两档冲突判定（strict 全事件对、git_merge 可合并性）、按路径集成树、四组合、claims、两层 epoch 幂等、saga 崩溃恢复、dispatch_anchor、组仲裁、message 级截断、replay 限制、终态三方同步 | `packages/kernel/kernel_tests/workspace/`、`packages/kernel/kernel_tests/checkpoint/` |
 | 架构门禁 | 无受保护成员字符串访问；core 不 import 插件/Graph；插件不 import core | `tests/architecture/` |
 | 集成 | fake_driver 双节点并行/冲突/回滚全链路；异步回滚时序；屏障 fail-closed；闸门降级 | `packages/plugins/graph/tests/`、`packages/kernel/kernel_tests/integration/` |
 | e2e | fix-findings 全链路；真实子代理回滚案例（claude SDK） | `tests/e2e/` + 服务器实验 |
