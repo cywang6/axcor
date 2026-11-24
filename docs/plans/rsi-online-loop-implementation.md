@@ -89,7 +89,7 @@ related_specs:
 
 | 序号 | 标识 | 内容 | 对应任务 | 前置 | 出口检查 | 完成 |
 |---:|---|---|---|---|---|---|
-| 1 | S0a | 文档集评审定稿（ADR-0001 + 双 spec + 本计划），协议冻结 | P0.1 | — | 评审通过 | ☐ |
+| 1 | S0a | 文档集评审定稿（ADR-0001 + 双 spec + 本计划），协议冻结 | P0.1 | — | 评审通过 | ☑ |
 | 2 | S0b | 量化 spike 脚本与执行：fix-findings 真实目录五项指标测量，结论回填 ADR-0001 | P0.2 | S0a | 指标可接受或路径策略调整结论落档 | ☐ |
 | 3 | S1a | `core/workspace/repository.py`：私有仓 + 基线导入（保留路径/排除清单）+ 首层物化与 `scope_base_commit` + 根双引用 | P1.1 | S0b | 基线完整性验收（含用户 `.git`、脏文件、未跟踪文件） | ☐ |
 | 4 | S1b | `core/workspace/scope_tree.py` + `gate.py` + `oplog.py`：作用域账本、两层 epoch、闸门状态机、三阶段 saga | P1.2 | S1a | saga 崩溃注入用例全过（含 GIT_WRITTEN 前判据、分叉即停） | ☐ |
@@ -192,3 +192,4 @@ D7 双轨（opencode 上游推动 + 宿主接管 task 工具 spike）与 P4 并�
 | 2026-11-24 | S0a 三轮落档：`path_set` 档名回退为 `strict`（需求方意见）；§4 表 S2b/S2c 并行修复；§7 验收项计数 1–38；风险表 S3c 前置改 S2w；P1.4 验收与 S1d 口径统一；动作词表自洽（§9.1 改用 AbandonScope→ScopeAbandoned，RestoreCommitted 入 §5.2 动作表）；§6.1 状态机补 Integrated/Released→Discarded；显式已合并回滚 P4.3 前明确拒绝；claims×档位 2×2 写死；目录评审四微调落档（`core/checkpoints.py` 平铺、restore/ 边界、oplog 横切声明、git 出口收敛 + 新门禁） | 同上 | 等待评审关闭 |
 | 2026-11-24 | 补选择性保留（换序重放）安全性论证与边界（spec §9.2.1，回应「并行写者同基线、回滚先到者是否拖累后到者」）；ADR D3 行注明升级路径 | 同上 | 等待评审关闭 |
 | 2026-11-24 | D3 改写（需求方确认）：第一版即选择性保留——失效集按基线谱系计算、保留者按原集成序换序重放；spec §9 表/§9.2 流程/§9.2.1 转为正式机制、验收 #7，ADR D3 与主决策，plan P4.3/S4c/M4 同步 | 同上 | 等待评审关闭 |
+| 2026-11-24 | **S0a 关闭**：三轮评审落档，ADR/双 spec 状态推进 Frozen，协议进入实现阶段；下一笔 S0b 量化 spike | 同上 | S0b 待 fix-findings 真实目录 |

@@ -1,7 +1,7 @@
 ---
 type: spec
 title: "traceback 工作区隔离与统一回滚技术规格（git worktree 写者作用域树）"
-status: In Review
+status: Frozen
 owner: "chenyangwang"
 created: 2026-11-23
 updated: 2026-11-24
@@ -15,7 +15,7 @@ related_plans:
 
 # traceback 工作区隔离与统一回滚技术规格（git worktree 写者作用域树）
 
-> 本规格是 [ADR-0001](../adr/0001-worktree-scope-tree-unified-rollback.md) 的协议全文；S0a 评审进行中，评审修订直接落本文，定稿后冻结、进入实现，冻结后修改须先走设计评审。方案选型理由与被否决方案见 ADR，本文不重复。前置阅读：[RSI 在线时长修复闭环规格](rsi-online-repair-loop.md)；本文只定义闭环中「回滚」的文件态实现与归属模型。
+> 本规格是 [ADR-0001](../adr/0001-worktree-scope-tree-unified-rollback.md) 的协议全文，已于 2026-11-24 冻结（S0a 三轮评审落档）；修改须先走设计评审。方案选型理由与被否决方案见 ADR，本文不重复。前置阅读：[RSI 在线时长修复闭环规格](rsi-online-repair-loop.md)；本文只定义闭环中「回滚」的文件态实现与归属模型。
 
 ## 1. 需求与术语
 

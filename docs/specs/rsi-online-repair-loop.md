@@ -1,7 +1,7 @@
 ---
 type: spec
 title: "RSI 在线时长修复闭环规格"
-status: Draft
+status: Frozen
 owner: "chenyangwang"
 created: 2026-11-23
 updated: 2026-11-24
