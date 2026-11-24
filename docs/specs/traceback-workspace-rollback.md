@@ -1,10 +1,10 @@
 ---
 type: spec
 title: "traceback 工作区隔离与统一回滚技术规格（git worktree 写者作用域树）"
-status: Frozen
+status: In Review
 owner: "chenyangwang"
 created: 2026-11-23
-updated: 2026-11-23
+updated: 2026-11-24
 related_adrs:
   - docs/adr/0001-worktree-scope-tree-unified-rollback.md
 related_specs:
@@ -15,7 +15,7 @@ related_plans:
 
 # traceback 工作区隔离与统一回滚技术规格（git worktree 写者作用域树）
 
-> 本规格是 [ADR-0001](../adr/0001-worktree-scope-tree-unified-rollback.md) 的协议全文，为冻结版本；进入实现后修改本规格须先走设计评审。方案选型理由与被否决方案见 ADR，本文不重复。前置阅读：[RSI 在线时长修复闭环规格](rsi-online-repair-loop.md)；本文只定义闭环中「回滚」的文件态实现与归属模型。
+> 本规格是 [ADR-0001](../adr/0001-worktree-scope-tree-unified-rollback.md) 的协议全文；S0a 评审进行中，评审修订直接落本文，定稿后冻结、进入实现，冻结后修改须先走设计评审。方案选型理由与被否决方案见 ADR，本文不重复。前置阅读：[RSI 在线时长修复闭环规格](rsi-online-repair-loop.md)；本文只定义闭环中「回滚」的文件态实现与归属模型。
 
 ## 1. 需求与术语
 
@@ -221,12 +221,12 @@ Graph 映射（住在 graph 插件内）：executor 出生 → `PrepareScopeWork
 | IntegrationCoordinator | `core/workspace/integration.py` 新增 | 集成线、串行集成、按路径集成树、两档冲突检测（§8.1）、集成线回退 | 新写 |
 | Manifest | `core/workspace/manifest.py` 新增 | 两维路径策略、物化/重建脚本登记、`inherit_from` 绑定 | 新写 |
 | oplog | `core/workspace/oplog.py` 新增 | 持久化操作状态机（§11） | 新写 |
-| CheckpointStore | `core/checkpoint/store.py` 迁移 | 检查点账本；schema 经 RunStore 统一迁移管理 | 插件迁移 |
+| CheckpointStore | `core/checkpoint/store.py` 迁移 | 检查点账本（新表 `scope_checkpoints`，与插件旧 `checkpoints` 表并存至 P5，§7）；schema 经 RunStore 统一迁移管理 | 插件迁移 |
 | ConversationRestorer | `core/restore/` 迁移提炼 | L2 读取、message 级截断、seed、`start_session_with_resume` + Run/作用域/epoch 绑定 | 插件迁移 |
 | SnapshotEngine | 暂留 `plugins/agent_traceback/`，最后随插件一起退役 | 兼容模式与历史快照读取 | 插件保留 |
 | 派发屏障 | 驱动层 `DriverHooks` 扩展 | `before_subagent_dispatch`（§10） | 新增契约 |
 | Graph 集成 | graph 插件 `driver/engine.py` 修改 | cwd 注入、映射表、异步回滚 op | 修改 |
-| Web 端点 | `web/routes/runs_routes.py` 修改 | 异步回滚 op、作用域/检查点查询 | 修改 |
+| Web 端点 | 内核 `api/run_api.py` 扩展（CoreAPI 方法）+ 控制台发行包路由装配（`web/routes/runs_routes.py` 住控制台仓，不在本仓） | 异步回滚 op、作用域/检查点查询 | 内核修改 + 控制台仓 PR |
 
 ### 5.4 私有仓、根检出与内部 Git 状态
 
@@ -357,10 +357,10 @@ fix-findings 落点：`op/build/**` 为 `writer_local + rebuildable`，重建脚
 
 ## 7. 数据模型
 
-`checkpoints` 表（schema 经 RunStore 统一迁移；旧列保留，历史行经兼容读取器访问）：
+核心新建 `scope_checkpoints` 表（schema 经 RunStore 统一迁移管理）。**与插件旧 `checkpoints` 表并存至 P5**：旧表由插件以旧列集继续读写、零改动（「旧单 session 与插件路径 P5 前不动」的硬约束）——核心新列均 NOT NULL 无默认值，若加进旧表，插件并存期的旧形态 `INSERT` 会撞约束失败，且 SQLite `ALTER TABLE ADD COLUMN NOT NULL` 必须带默认值，同表迁移在并存期不成立；P5 插件删除后旧表仅经兼容读取器访问：
 
 ```sql
-CREATE TABLE IF NOT EXISTS checkpoints (
+CREATE TABLE IF NOT EXISTS scope_checkpoints (
     checkpoint_id    TEXT PRIMARY KEY,
     scope_id         TEXT NOT NULL,       -- 核心唯一理解的归属
     scope_kind       TEXT NOT NULL,       -- root | main_writer | subagent
@@ -368,7 +368,6 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     scope_epoch      INTEGER NOT NULL,
     root_epoch       INTEGER NOT NULL,
     trigger          TEXT NOT NULL,       -- scope_start | before_child | terminal
-                                        -- 兼容旧值: subagent_start | session_complete
     barrier_quality  TEXT NOT NULL,       -- precise | late_barrier
     git_ref          TEXT,                -- snapshot 兼容模式快照仓 commit
     workspace_branch TEXT,
@@ -382,9 +381,6 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     child_session_map TEXT,               -- JSON: {scope_id -> native_child_session_id}，启动后回填
     claims           TEXT,                -- JSON: 声明写路径 glob（§8.3）
     orchestration_state_ref TEXT,         -- 不透明编排状态引用，核心仅存不解析
-    -- 兼容列（旧插件行）
-    session_id TEXT, iteration INTEGER, agent_id TEXT, agent_type TEXT,
-    event_rowid INTEGER, main_part_id TEXT, parent_checkpoint_id TEXT,
     created_at TEXT NOT NULL,
     file_count INTEGER DEFAULT 0, byte_size INTEGER DEFAULT 0,
     status TEXT DEFAULT 'ok'
@@ -738,7 +734,7 @@ traceback:
 
 节点级：`writes: [glob...]`。子代理级：`workspace: writer（默认）| reader`。
 
-运行时查询：`GET /api/v1/runs/{id}/scopes`、`GET /api/v1/runs/{id}/checkpoints`；回滚走 `POST /api/v1/runs/{id}/driver/op`（异步返回 operation_id；状态经 `GET .../operations/{id}` 或事件）。snapshot 兼容模式配置在插件退役前继续由插件配置承载。
+运行时查询：`GET /api/v1/runs/{id}/scopes`、`GET /api/v1/runs/{id}/checkpoints`；回滚走 `POST /api/v1/runs/{id}/driver/op`（异步返回 operation_id；状态经 `GET .../operations/{id}` 或事件）。HTTP 路由住控制台发行包（本仓侧只到 `api/run_api.py` 的 CoreAPI 方法层，控制台路由 PR 开在控制台仓）。snapshot 兼容模式配置在插件退役前继续由插件配置承载。
 
 ## 16. 失败模式与风险
 

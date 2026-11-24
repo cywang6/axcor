@@ -4,7 +4,7 @@ title: "RSI 在线时长修复闭环与工作区隔离回滚实施计划"
 status: Planned
 owner: "chenyangwang"
 created: 2026-11-23
-updated: 2026-11-23
+updated: 2026-11-24
 related_design: docs/specs/traceback-workspace-rollback.md
 related_adrs:
   - docs/adr/0001-worktree-scope-tree-unified-rollback.md
@@ -26,8 +26,9 @@ related_specs:
 ## 2. 前置条件
 
 - 本仓现有测试全绿（`uv sync && uv run pytest -q`），ruff / lint-imports / codespell / 架构门禁通过。
-- fix-findings 首次实验现场已按 [RSI 闭环规格 §8.4](../specs/rsi-online-repair-loop.md) 准备（起始源码、节点开始前产物、可执行环境、耗时判据、知识卡片）。
+- fix-findings 首次实验现场已按 [RSI 闭环规格 §7.3](../specs/rsi-online-repair-loop.md) 准备（起始源码、节点开始前产物、可执行环境、耗时判据、知识卡片）。
 - RSI 侧与接入仓的改动开在各自仓库（RSI 仓、`glacier-rsi` 接入仓），本计划只登记接口与联调顺序，其 PR 不占本仓 PR 编号预算。
+- Web 查询/回滚端点的 HTTP 路由住控制台发行包（不在本仓，见 ARCHITECTURE「内核与控制台边界」）：S2c 的内核侧 CoreAPI 扩展（`api/run_api.py`）在本仓，路由装配 PR 开在控制台仓，同样只登记不占编号预算。
 - 每个阶段保持 Web、Headless 和现有插件行为兼容；旧单 session 与插件路径在 P5 之前完全不动。
 
 ## 3. 阶段与任务
@@ -36,7 +37,7 @@ related_specs:
 
 | ID | 任务 | 产出 | 依赖 | 验收 |
 |---|---|---|---|---|
-| P0.1 | 本目录三份文档（ADR/spec/plan）评审定稿，协议以冻结版进入实现 | 本文档集 | 无 | 评审通过，后续改动走设计评审 |
+| P0.1 | 本文档集四份（ADR-0001 + 双 spec + 本计划，分居 `docs/adr`、`docs/specs`、`docs/plans`）评审定稿，协议以冻结版进入实现 | 本文档集 | 无 | 评审通过，后续改动走设计评审 |
 | P0.2 | 量化 spike：用 fix-findings 真实目录测五项指标——初始基线导入耗时、单节点 worktree 检出耗时、`op/build` 纳入 checkpointed 后每次打点的提交耗时与磁盘增量、回滚恢复耗时、下游继承构建产物的成本 | spike 脚本与测量报告 | P0.1 | 指标可接受，或路径策略调整结论回填 ADR-0001 备注；GB 级产物超标路径改 `rebuildable` 或评估 reflink/内容寻址仓 |
 
 ### P1：私有仓 + 作用域核心
@@ -46,15 +47,15 @@ related_specs:
 | P1.1 | `core/workspace/repository.py`：私有仓布局、基线导入（脏文件+未跟踪+内部 git 保留路径+排除清单防递归）、首层物化与 `scope_base_commit`、`root_seed_checkpoint`/`root_integration_head` | Repository 模块 + 单测 | P0.2 | 含未提交/未跟踪/用户 `.git` 的目录建区基线逐字节一致；用户仓 refs/HEAD/index/hooks 未改；根目录无 OpsBot git 元数据 |
 | P1.2 | `core/workspace/scope_tree.py`（作用域账本 + 两层 epoch）+ `core/workspace/gate.py`（闸门状态机）+ `core/workspace/oplog.py`（三阶段 saga） | 账本/闸门/oplog + 单测 | P1.1 | 作用域 CRUD/epoch 幂等单测；闸门状态机与降级分支单测；saga 三阶段崩溃注入（含 GIT_WRITTEN 前判据、分叉即停不 reset） |
 | P1.3 | `core/workspace/manager.py`（worktree 生命周期、物化、GC）+ `core/workspace/integration.py`（串行集成 + 按路径集成树，相交路径按 `conflict_policy` 档位处理：git_merge 走 merge-tree 三方合并、strict 在 P2.2 拒绝）+ 通用动作/通知协议类型 + `core/workspace/manifest.py`（两维路径策略） | 工作区/集成/manifest + 单测 | P1.2 | fake 编排经协议建区/集成；四组合路径策略行为正确；writer_local 不误报冲突 |
-| P1.4 | `core/checkpoint/store.py` 迁移（自插件 CheckpointStore），schema 经 RunStore 统一迁移管理；检查点类型 `scope_start`/`terminal` 与持久化顺序（编排状态→文件 commit→检查点行→发布） | CheckpointStore + 迁移单测 | P1.2 | schema 由 RunStore 迁移管理；旧检查点行兼容读取 |
+| P1.4 | `core/checkpoint/store.py` 迁移（自插件 CheckpointStore）：核心新建 `scope_checkpoints` 表、schema 经 RunStore 统一迁移管理；插件旧 `checkpoints` 表并存至 P5 零改动（同表加 NOT NULL 列会撞插件并存写入，spec §7）；检查点类型 `scope_start`/`terminal` 与持久化顺序（编排状态→文件 commit→检查点行→发布）的 store 侧支持，生命周期触发接线在 P2.1 | CheckpointStore + 迁移单测 | P1.2 | schema 由 RunStore 迁移管理；并存期插件旧形态写入不受新 schema 影响；旧表历史行经兼容读取器读取 |
 
 ### P2：Graph 节点级垂直切片（旧单 session 与插件路径不动）
 
 | ID | 任务 | 产出 | 依赖 | 验收 |
 |---|---|---|---|---|
-| P2.1 | graph engine cwd 注入（7 处 `cwd=self._work_dir` 改为作用域工作区 + `WORKSPACE_DIR` 注入）；节点 executor/verifier 出生映射 `PrepareScopeWorkspace`；`awaiting_integration` 定序 + executor→verifier 闸门；`scope_start`/`terminal` 打点接线 | Graph 接线 + 集成测试 | P1.3、P1.4 | 双节点并行写不相交路径隔离 + 按序集成；验收通过 ≠ 集成完成（`awaiting_integration` 居中）；executor 后台写未静止前 verifier 不得启动 |
+| P2.1 | graph engine cwd 注入（7 处 `cwd=self._work_dir` 改为作用域工作区 + `WORKSPACE_DIR` 注入）；节点 executor/verifier 出生映射 `PrepareScopeWorkspace`；`awaiting_integration` 定序 + executor→verifier 闸门；`scope_start`/`terminal` 打点接线；**RunCoordinator 生产执行桥**——`PrepareScopeWorkspace`/`IntegrateScope` 等动作的生产派发接线（spec §5.1：协调器是唯一 I/O 手；P1.3 的 fake 编排只覆盖测试侧） | Graph 接线 + 协调器执行桥 + 集成测试 | P1.3、P1.4 | 双节点并行写不相交路径隔离 + 按序集成；验收通过 ≠ 集成完成（`awaiting_integration` 居中）；executor 后台写未静止前 verifier 不得启动 |
 | P2.2 | 两档冲突检测（`conflict_policy`：`git_merge` 默认 = 以 `integration_base_commit` 为基准、限定 merge 路径集求交后走 merge-tree 可合并性判定；`strict` = 路径集重叠即拒绝，覆盖全部事件对）+ claims 软预检 + `fault.workspace_conflict` 入 watchdog 词表 | 冲突检测 + 单测/集成测试 | P2.1 | git_merge 档同文件不相交 hunk 并行写自动合并放行、真实合并冲突检出；strict 档同文件并行写（含 Git 可自动合并）检出；writer 修改 writer_local 路径、父树无变化时不误报；载荷含冲突路径与双方身份 |
-| P2.3 | 未合并节点回滚异步状态机：通用 `plan_restore`（既有 `plan_rollback` 变为其调用方之一，并保留动态子图特例——target 为子图节点时父 generator 进新回滚代但立即置回 passed、不重新编排、其子图不废弃、回滚边记在 generator）、`AbandonScope`/`RestoreScope`/`PrepareScopeWorkspace` 动作、driver/op 异步化（op 只登记 `pending_rollback` 返回 operation_id）、`GET .../scopes`、`GET .../checkpoints`、`GET .../operations/{id}` 端点 | 异步回滚 + Web 端点 + 集成测试 | P2.2 | op 立即返回 operation_id；回滚幂等、旧 epoch 回执被拒、失效集外零变化；兄弟已集成时新基线含其成果（redo on latest integration head）；generator 特例符合 spec §9.1.1 |
+| P2.3 | 未合并节点回滚异步状态机：通用 `plan_restore`（既有 `plan_rollback` 变为其调用方之一，并保留动态子图特例——target 为子图节点时父 generator 进新回滚代但立即置回 passed、不重新编排、其子图不废弃、回滚边记在 generator）、`AbandonScope`/`RestoreScope`/`PrepareScopeWorkspace` 动作、driver/op 异步化（op 只登记 `pending_rollback` 返回 operation_id）、内核 CoreAPI 增加 scopes/checkpoints/operations 查询与回滚方法（HTTP 路由 `GET .../scopes`、`GET .../checkpoints`、`GET .../operations/{id}` 的装配 PR 开在控制台发行包） | 异步回滚 + CoreAPI 扩展 + 集成测试（控制台路由 PR 登记在控制台仓） | P2.2 | op 立即返回 operation_id；回滚幂等、旧 epoch 回执被拒、失效集外零变化；兄弟已集成时新基线含其成果（redo on latest integration head）；generator 特例符合 spec §9.1.1 |
 
 ### P3：RSI fix-findings 闭环
 
@@ -84,7 +85,7 @@ related_specs:
 
 ## 4. PR 级施工顺序
 
-每个 PR 单一主题；变更量建议 100–500 行、上限 1000 行，修改文件建议 5–20 个、超过 30 个应拆分（评审体量约束）；行为变化不与结构搬移混排。S 编号即建议的 PR 顺序；跨仓 PR（S3c–S3e、S4 中 RSI 侧部分）开在各所属仓库，此处登记以保持全局顺序可见。
+每个 PR 单一主题；变更量建议 100–500 行、上限 1000 行，修改文件建议 5–20 个、超过 30 个应拆分（评审体量约束）；行为变化不与结构搬移混排。S 编号即建议的 PR 顺序；跨仓 PR（S3c–S3e、S4 中 RSI 侧部分、S2c 的控制台路由 PR）开在各所属仓库，此处登记以保持全局顺序可见。体量风险预案：S1a/S1b/S2a/S4a 单笔可能超上限，施工时按子主题再拆（如 S2a 拆「cwd 注入+出生映射」与「定序+闸门+打点+执行桥」两笔），拆分不改变依赖关系。
 
 | 序号 | 标识 | 内容 | 对应任务 | 前置 | 出口检查 | 完成 |
 |---:|---|---|---|---|---|---|
@@ -93,10 +94,10 @@ related_specs:
 | 3 | S1a | `core/workspace/repository.py`：私有仓 + 基线导入（保留路径/排除清单）+ 首层物化与 `scope_base_commit` + 根双引用 | P1.1 | S0b | 基线完整性验收（含用户 `.git`、脏文件、未跟踪文件） | ☐ |
 | 4 | S1b | `core/workspace/scope_tree.py` + `gate.py` + `oplog.py`：作用域账本、两层 epoch、闸门状态机、三阶段 saga | P1.2 | S1a | saga 崩溃注入用例全过（含 GIT_WRITTEN 前判据、分叉即停） | ☐ |
 | 5 | S1c | `core/workspace/manager.py` + `integration.py` + `manifest.py`：worktree 生命周期/GC、串行集成、按路径集成树、两维路径策略；动作/通知协议类型 | P1.3 | S1b | fake 编排经协议建区/集成；四组合路径策略正确 | ☐ |
-| 6 | S1d | `core/checkpoint/store.py` 迁移 + RunStore schema 迁移接线 + `scope_start`/`terminal` 打点与持久化顺序 | P1.4 | S1b | schema 经 RunStore 管理；旧行兼容读取 | ☐ |
-| 7 | S2a | Graph 接线：engine cwd/`WORKSPACE_DIR` 注入、executor/verifier 映射 `PrepareScopeWorkspace`、`awaiting_integration` 定序、executor→verifier 闸门 | P2.1 | S1c、S1d | 双节点并行写不相交路径隔离 + 按序集成；verifier 时序正确 | ☐ |
+| 6 | S1d | `core/checkpoint/store.py` 迁移 + RunStore schema 迁移接线：核心新建 `scope_checkpoints` 表与插件旧表并存（spec §7），检查点类型与持久化顺序的 store 侧支持（生命周期触发接线在 S2a/S1c） | P1.4 | S1b | schema 经 RunStore 管理；并存期插件写入互不干扰；旧表历史行兼容读取 | ☐ |
+| 7 | S2a | Graph 接线：engine cwd/`WORKSPACE_DIR` 注入、executor/verifier 映射 `PrepareScopeWorkspace`、`awaiting_integration` 定序、executor→verifier 闸门、RunCoordinator 生产执行桥（动作协议的生产派发接线） | P2.1 | S1c、S1d | 双节点并行写不相交路径隔离 + 按序集成；verifier 时序正确 | ☐ |
 | 8 | S2b | 两档冲突检测（`git_merge` 默认 / `strict`）+ claims 软预检 + `fault.workspace_conflict`/`fault.scope_quiesce_failed` 入 watchdog 词表 | P2.2 | S2a | git_merge 档可合并放行/真冲突拒绝用例；strict 档全部路径事件对拒绝用例；writer_local 不误报 | ☐ |
-| 9 | S2c | 未合并节点回滚异步状态机：`plan_restore`（含动态子图特例）、作用域动作、driver/op 异步化与 operation_id、scopes/checkpoints/operations 查询端点 | P2.3 | S2b | 幂等、旧 epoch 拒绝、失效集外零变化、redo-on-latest-head 语义；target 为子图节点时 generator 置回 passed 不重跑、其子图不废弃、回滚边记在 generator | ☐ |
+| 9 | S2c | 未合并节点回滚异步状态机：`plan_restore`（含动态子图特例）、作用域动作、driver/op 异步化与 operation_id、内核 CoreAPI scopes/checkpoints/operations 查询与回滚方法（HTTP 路由装配 PR 开在控制台发行包） | P2.3 | S2b | 幂等、旧 epoch 拒绝、失效集外零变化、redo-on-latest-head 语义；target 为子图节点时 generator 置回 passed 不重跑、其子图不废弃、回滚边记在 generator | ☐ |
 | 10 | S3a | watchdog 超时能力：子代理独立计时 + 节点累计超时 `fault.node_timeout`（与 P1/P2 可并行，此处按合入序排列） | P3.1 | S0a | 慢任务与卡死任务均按时告警；暂停不计时、重启保留已用时间 | ☐ |
 | 11 | S3b | 当前文件加载：更新现有 Run 任务定义、保留节点状态与产物、不新建 Run | P3.2 | S2c | 修复后原 Run 加载新定义继续 | ☐ |
 | 12 | S3c | 接入仓：adapter.mjs + opsbot_bridge.py + start_online.py（含定时 tick 与重启恢复核对） | P3.3 | S2c、S3a | 重启恢复原任务，不重复创建 loop/Graph | ☐ |
@@ -134,20 +135,23 @@ related_specs:
 ```text
 S0a 协议冻结
     ↓
-S0b 量化 spike ──────────────────────→ S3a 超时能力（与 P1/P2 并行）
-    ↓                                        ↓
+S0b 量化 spike ────────────────────→ S3a 超时能力（与 P1/P2 并行）─┐
+    ↓                                                              │
 S1a 私有仓/基线 → S1b 账本/闸门/oplog → S1c 工作区/集成 → S1d 检查点迁移
                                                             ↓
                                           S2a Graph 接线 → S2b 冲突检测 → S2c 异步回滚
-                                                                            ↓
-                                                            S3b 当前文件加载
-                                                                            ↓
-                                          S3c 适配器/启动脚本 → S3d RSI 侧信号与验证
-                                                                            ↓
-                                                            S3e fix-findings e2e（M3）
-                                                                            ↓
+                                                                          ↓     │
+                                            ┌─────────────────────────────┤     │
+                                            ↓                             ↓     │
+                                          S3b 当前文件加载          S3c 适配器/启动脚本 ←┘
+                                            │                             ↓
+                                            │                       S3d RSI 侧信号与验证
+                                            └─────────────┬───────────────┘
+                                                          ↓
+                                          S3e fix-findings e2e（M3）
+                                                          ↓
                                           S4a dispatch_group+屏障 → S4b 子代理回滚 → S4c 已合并回滚
-                                                                            ↓
+                                                          ↓
                                           S5a 单 session 迁移 → S5b 能力迁移 → S5c 删插件
 ```
 
@@ -163,7 +167,7 @@ D7 双轨（opencode 上游推动 + 宿主接管 task 工具 spike）与 P4 并�
 | 多步操作中途崩溃 | 协调器进程被杀 | 高 | 三阶段 saga + 三态核对；分叉即停绝不自动 reset |
 | 既有单 session 行为回退 | 迁移前后重放/import 回归失败 | 高 | P5 才动旧路径；迁移期插件经 SDK 端口；两点不回退为 M5 硬验收 |
 | 双基线字段误用（scope_base 当冲突基准） | fix-findings 集成误报 conflict | 中 | §8.1/§9.3 强制 integration_base/integration_commit；验收 #31/#32 兜底 |
-| 跨仓联调顺序错位（RSI/接入仓先于本仓能力） | e2e 接口不匹配 | 中 | S3c/S3d 以 S2c/S3a 出口为前置；接口契约以 spec §9.3 为准 |
+| 跨仓联调顺序错位（RSI/接入仓先于本仓能力） | e2e 接口不匹配 | 中 | S3c/S3d 以 S2c/S3a 出口为前置；接口契约以 RSI 闭环规格 §8 与 traceback 规格 §9.1/§14 为准 |
 
 ## 7. 验收标准
 
@@ -177,4 +181,5 @@ D7 双轨（opencode 上游推动 + 宿主接管 task 工具 spike）与 P4 并�
 
 | 日期 | 进展 | 证据/链接 | 变更或阻塞 |
 |---|---|---|---|
-| 2026-11-23 | 创建 ADR-0001、双 spec 与本计划 | 本目录四份文档 | 等待评审（S0a） |
+| 2026-11-23 | 创建 ADR-0001、双 spec 与本计划 | `docs/adr`、`docs/specs`、`docs/plans` 下四份文档 | S0a 评审中 |
+| 2026-11-24 | S0a 首轮评审意见落档：检查点核心/插件分表（spec §7）、控制台发行包登记（§2/P2.3/S2c）、RunCoordinator 生产执行桥归属（P2.1/S2a）、引用与状态口径修订（B1–B4）；冲突检测档位化 `conflict_policy`（ADR D9 + spec §8） | 同上 | 等待评审关闭 |
