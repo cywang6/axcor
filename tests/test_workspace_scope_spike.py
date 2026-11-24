@@ -18,7 +18,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "workspace_scope_spike.py"
+
+# 子集导出布局不含 scripts/，脚本缺席时按缺席面跳过
+pytestmark = pytest.mark.skipif(
+    not SCRIPT.exists(), reason="本布局无 scripts/workspace_scope_spike.py"
+)
 
 
 def test_minimal_synthetic_spike_completes(tmp_path: Path) -> None:
