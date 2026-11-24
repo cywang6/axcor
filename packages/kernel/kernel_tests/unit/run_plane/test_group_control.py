@@ -682,7 +682,11 @@ class TestPauseResume:
         assert h.so.paused == []  # 序列未走到成员暂停
 
     async def test_driver_pause_resume_clears_unsuspended_accounting(self, tmp_path):
-        """驱动路组暂停账在恢复时全量清：未挂起成员（在跑/已终态）仅清账、不代 resume。"""
+        """驱动路组暂停账在恢复时全量清：未挂起的在跑成员仅清账、不代 resume。
+
+        成员用慢速名（不自终结）：暂停记账写在与成员终态之间是时序敏感的，
+        自终结成员会让记账窗口收窄成竞态。
+        """
 
         class SelfPauseDriver(RecordingDriver):
             def decide(self, world, notifications):
@@ -690,7 +694,7 @@ class TestPauseResume:
                 self.worlds.append(world)
                 self._consume(notifications)
                 if self.rounds == 1:
-                    return [StartSession(spec=_spec("n1"), context="a")]
+                    return [StartSession(spec=_spec("n-slow"), context="a")]
                 if self.rounds == 2:
                     return [PauseRun(reason="awaiting_answer")]
                 return []
