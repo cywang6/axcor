@@ -707,13 +707,7 @@ fix-findings 案例在本模型下的行为：
 traceback:
   enabled: true                  # 总开关：不开则无检查点、回滚 API 明确拒绝
   mode: workspace                # workspace（默认，严格） | snapshot_compatible（仅历史读取/离线导入）
-  on_unsafe_workspace: fail      # fail（默认，D2）
   on_no_dispatch_barrier: fail   # fail（默认）| compat_late_barrier（显式弱化）
-  single_session:
-    root_sync: terminal          # D5 终态同步：三方同步（基线 = 启动时导入的 seed 快照）——
-                                 # 原目录与基线一致时同步完整终态（含 agent 的删除生效）；
-                                 # 基线之外的用户新增文件不触碰；原目录有外部变化则停止覆盖、
-                                 # 按路径报告冲突并保留托管终态；原目录 .git 与保留路径不参与同步
   workspace:
     root: ""
     retain_after_merge: false
@@ -734,6 +728,8 @@ traceback:
   claims:
     enforce: false
 ```
+
+D2 与 D5 是固定行为、不设配置项：无法安全建区一律 fail-fast 拒绝（无降级档）；单 session 终态三方同步（基线 = 启动时导入的 seed 快照）——原目录与基线一致时同步完整终态（含 agent 的删除生效）；基线之外的用户新增文件不触碰；原目录有外部变化则停止覆盖、按路径报告冲突并保留托管终态；原目录 `.git` 与保留路径不参与同步。
 
 节点级：`writes: [glob...]`。子代理级：`workspace: writer（默认）| reader`。
 
