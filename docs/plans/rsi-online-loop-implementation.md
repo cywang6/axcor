@@ -89,8 +89,8 @@ related_specs:
 
 | 序号 | 标识 | 内容 | 对应任务 | 前置 | 出口检查 | 完成 |
 |---:|---|---|---|---|---|---|
-| 1 | S0a | 文档集评审定稿（ADR-0001 + 双 spec + 本计划），协议冻结 | P0.1 | — | 评审通过 | ☑ |
-| 2 | S0b | 量化 spike 脚本与执行：fix-findings 真实目录五项指标测量，结论回填 ADR-0001 | P0.2 | S0a | 指标可接受或路径策略调整结论落档 | ☑ |
+| 1 | S0a | 文档集评审定稿（ADR-0001 + 双 spec + 本计划），协议冻结 | P0.1 | — | 评审通过 | ✅ |
+| 2 | S0b | 量化 spike 脚本与执行：fix-findings 真实目录五项指标测量，结论回填 ADR-0001 | P0.2 | S0a | 指标可接受或路径策略调整结论落档 | ✅ |
 | 3 | S1a | `core/workspace/repository.py`：私有仓 + 基线导入（保留路径/排除清单）+ 首层物化与 `scope_base_commit` + 根双引用 | P1.1 | S0b | 基线完整性验收（含用户 `.git`、脏文件、未跟踪文件） | ☐ |
 | 4 | S1b | `core/workspace/scope_tree.py` + `gate.py` + `oplog.py`：作用域账本、两层 epoch、闸门状态机、三阶段 saga | P1.2 | S1a | saga 崩溃注入用例全过（含 GIT_WRITTEN 前判据、分叉即停） | ☐ |
 | 5 | S1c | `core/workspace/manager.py` + `integration.py` + `manifest.py`：worktree 生命周期/GC、串行集成、按路径集成树、两维路径策略；动作/通知协议类型 | P1.3 | S1b | fake 编排经协议建区/集成；四组合路径策略正确 | ☐ |
