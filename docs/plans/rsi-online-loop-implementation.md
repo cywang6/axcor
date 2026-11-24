@@ -183,14 +183,9 @@ D7 双轨（opencode 上游推动 + 宿主接管 task 工具 spike）与 P4 并�
 
 ## 8. 进度记录
 
+记录粒度与 §4 施工顺序对齐：一个 PR 一条记录；PR 内的评审修订、勘误与后续补充合并重写进该条，不逐次追加；非结论性的过程历史可省略。
+
 | 日期 | 进展 | 证据/链接 | 变更或阻塞 |
 |---|---|---|---|
-| 2026-11-23 | 创建 ADR-0001、双 spec 与本计划 | `docs/adr`、`docs/specs`、`docs/plans` 下四份文档 | S0a 评审中 |
-| 2026-11-24 | S0a 首轮评审意见落档：检查点核心/插件分表（spec §7）、控制台发行包登记（§2/P2.3/S2c）、RunCoordinator 生产执行桥归属（P2.1/S2a）、引用与状态口径修订（B1–B4）；冲突检测档位化 `conflict_policy`（ADR D9 + spec §8） | 同上 | 等待评审关闭 |
-| 2026-11-24 | S0a 二轮评审落档：N1 验收失败回滚语义明写（spec §9 + 验收 #38）；S2w 控制台路由行登记（S3c 前置改为 S2w）；依赖图修正（S0a→S3a、S4c 并立 S4a）；`strict` 档更名 `path_set`（后于三轮回退）；claims 与 git_merge 倒挂消除（§8.3）；体量约束放宽为建议 1000 行以内；RSI spec 三处旧口径同步 | 同上 | 等待评审关闭 |
-| 2026-11-24 | 单值配置项移除（需求方意见）：`on_unsafe_workspace`、`single_session.root_sync` 出配置面（连同 `single_session:` 节），D2/D5 改为 spec §15 明文固定行为 | 同上 | 等待评审关闭 |
-| 2026-11-24 | S0a 三轮落档：`path_set` 档名回退为 `strict`（需求方意见）；§4 表 S2b/S2c 并行修复；§7 验收项计数 1–38；风险表 S3c 前置改 S2w；P1.4 验收与 S1d 口径统一；动作词表自洽（§9.1 改用 AbandonScope→ScopeAbandoned，RestoreCommitted 入 §5.2 动作表）；§6.1 状态机补 Integrated/Released→Discarded；显式已合并回滚 P4.3 前明确拒绝；claims×档位 2×2 写死；目录评审四微调落档（`core/checkpoints.py` 平铺、restore/ 边界、oplog 横切声明、git 出口收敛 + 新门禁） | 同上 | 等待评审关闭 |
-| 2026-11-24 | 补选择性保留（换序重放）安全性论证与边界（spec §9.2.1，回应「并行写者同基线、回滚先到者是否拖累后到者」）；ADR D3 行注明升级路径 | 同上 | 等待评审关闭 |
-| 2026-11-24 | D3 改写（需求方确认）：第一版即选择性保留——失效集按基线谱系计算、保留者按原集成序换序重放；spec §9 表/§9.2 流程/§9.2.1 转为正式机制、验收 #7，ADR D3 与主决策，plan P4.3/S4c/M4 同步 | 同上 | 等待评审关闭 |
-| 2026-11-24 | **S0a 关闭**：三轮评审落档，ADR/双 spec 状态推进 Frozen，协议进入实现阶段；下一笔 S0b 量化 spike | 同上 | S0b 待 fix-findings 真实目录 |
-| 2026-11-24 | S0b 完成：量化 spike 脚本入仓并附冒烟测试；真实目录不在本机，经需求方确认改用同画像合成目录（构建产物 1 GiB/2000 文件、源码 4000 文件、用户仓 `.git` 64 MB、每轮刷新 25%）。五项指标：基线导入 34 s、worktree 建区 1.2 s、checkpointed 打点每轮 6 s 与磁盘 +240 MB（排除产物对照 0.19 s/+0.1 MB）、回滚恢复 2.5 s（废弃重建 4.5 s）、下游继承物化 2.8–3.6 s。结论：GB 级构建产物维持 `writer_local + rebuildable` 不进检查点提交（产物可由源码确定性重建，纳入则磁盘随打点轮数线性增长）；测量现场按最坏口径（产物纳入检查点、双作用域各物化一份副本）净占用约为目录本体 5 倍，产物走 rebuildable 时私有仓不含产物、作用域产物由重建脚本生成，磁盘显著低于该值；已回填决策记录备注 | `scripts/workspace_scope_spike.py`、`tests/test_workspace_scope_spike.py`、`docs/adr/0001-worktree-scope-tree-unified-rollback.md` | S1a 可开工 |
+| 2026-11-24 | S0a 完成：文档集（ADR-0001 + 双 spec + 本计划）经三轮评审定稿，协议冻结，ADR/双 spec 状态推进 Frozen、进入实现阶段。评审落定的关键修订：检查点核心/插件分表（新表 `scope_checkpoints` 与插件旧表并存至 P5）；Web 端点路由住控制台发行包并独立登记 S2w 行（S3c 前置随之改 S2w）；RunCoordinator 生产执行桥归 P2.1/S2a；验收失败回滚一律按未合并编排语义（目标集成成果保留不撤文件），显式已合并回滚 P4.3 前明确拒绝；冲突检测档位化 `conflict_policy`（`git_merge` 默认、`strict` 路径集重叠即违规）；D3 定稿为选择性保留——失效集按基线谱系计算、保留者按原集成序换序重放，安全性论证固化在 spec §9.2.1；单值配置项 `on_unsafe_workspace`、`single_session.root_sync` 移出配置面（D2/D5 为固定行为）；动作词表自洽与目录评审四微调（`core/checkpoints.py` 平铺、restore/ 边界、oplog 横切声明、git 子进程出口收敛 + 新架构门禁） | `docs/adr`、`docs/specs`、`docs/plans` | 评审关闭，S0b 进行中 |
+| 2026-11-24 | S0b 完成：量化 spike 脚本入仓并附冒烟测试（子集导出布局缺席 `scripts/` 时跳过）；真实目录不在本机，经需求方确认改用同画像合成目录（构建产物 1 GiB/2000 文件、源码 4000 文件、用户仓 `.git` 64 MB、每轮刷新 25%）。五项指标：基线导入 34 s、worktree 建区 1.2 s、checkpointed 打点每轮 6 s 与磁盘 +240 MB（排除产物对照 0.19 s/+0.1 MB）、回滚恢复 2.5 s（废弃重建 4.5 s）、下游继承物化 2.8–3.6 s。结论：GB 级构建产物维持 `writer_local + rebuildable` 不进检查点提交（产物可由源码确定性重建，纳入则磁盘随打点轮数线性增长）；测量现场按最坏口径（产物纳入检查点、双作用域各物化一份副本）净占用约为目录本体 5 倍，产物走 rebuildable 时私有仓不含产物、作用域产物由重建脚本生成，磁盘显著低于该值；结论已回填决策记录备注 | `scripts/workspace_scope_spike.py`、`tests/test_workspace_scope_spike.py`、`docs/adr/0001` | S1a 可开工 |
