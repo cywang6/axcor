@@ -187,6 +187,7 @@ D7 双轨（opencode 上游推动 + 宿主接管 task 工具 spike）与 P4 并�
 |---|---|---|---|
 | 2026-11-23 | 创建 ADR-0001、双 spec 与本计划 | `docs/adr`、`docs/specs`、`docs/plans` 下四份文档 | S0a 评审中 |
 | 2026-11-24 | S0a 首轮评审意见落档：检查点核心/插件分表（spec §7）、控制台发行包登记（§2/P2.3/S2c）、RunCoordinator 生产执行桥归属（P2.1/S2a）、引用与状态口径修订（B1–B4）；冲突检测档位化 `conflict_policy`（ADR D9 + spec §8） | 同上 | 等待评审关闭 |
-| 2026-11-24 | S0a 二轮评审落档：N1 验收失败回滚语义明写（spec §9 + 验收 #38）；S2w 控制台路由行登记（S3c 前置改为 S2w）；依赖图修正（S0a→S3a、S4c 并立 S4a）；`strict` 档更名 `strict`；claims 与 git_merge 倒挂消除（§8.3）；体量约束放宽为建议 1000 行以内；RSI spec 三处旧口径同步 | 同上 | 等待评审关闭 |
+| 2026-11-24 | S0a 二轮评审落档：N1 验收失败回滚语义明写（spec §9 + 验收 #38）；S2w 控制台路由行登记（S3c 前置改为 S2w）；依赖图修正（S0a→S3a、S4c 并立 S4a）；`strict` 档更名 `path_set`（后于三轮回退）；claims 与 git_merge 倒挂消除（§8.3）；体量约束放宽为建议 1000 行以内；RSI spec 三处旧口径同步 | 同上 | 等待评审关闭 |
 | 2026-11-24 | 单值配置项移除（需求方意见）：`on_unsafe_workspace`、`single_session.root_sync` 出配置面（连同 `single_session:` 节），D2/D5 改为 spec §15 明文固定行为 | 同上 | 等待评审关闭 |
 | 2026-11-24 | S0a 三轮落档：`path_set` 档名回退为 `strict`（需求方意见）；§4 表 S2b/S2c 并行修复；§7 验收项计数 1–38；风险表 S3c 前置改 S2w；P1.4 验收与 S1d 口径统一；动作词表自洽（§9.1 改用 AbandonScope→ScopeAbandoned，RestoreCommitted 入 §5.2 动作表）；§6.1 状态机补 Integrated/Released→Discarded；显式已合并回滚 P4.3 前明确拒绝；claims×档位 2×2 写死；目录评审四微调落档（`core/checkpoints.py` 平铺、restore/ 边界、oplog 横切声明、git 出口收敛 + 新门禁） | 同上 | 等待评审关闭 |
+| 2026-11-24 | 补选择性保留（换序重放）安全性论证与边界（spec §9.2.1，回应「并行写者同基线、回滚先到者是否拖累后到者」）；ADR D3 行注明升级路径 | 同上 | 等待评审关闭 |
