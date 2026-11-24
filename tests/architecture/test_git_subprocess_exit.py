@@ -35,15 +35,23 @@ GIT_SUBPROCESS_EXIT_MODULES = frozenset(
 
 
 def _starts_with_git(command: ast.expr) -> bool:
-    """调用首实参是否为以 git 开头的命令（裸串或列表首元素）。"""
-    if isinstance(command, ast.Constant):
-        return command.value == "git"
+    """命令实参是否以 git 开头（裸串、shell 命令串或列表首元素）。"""
+    if isinstance(command, ast.Constant) and isinstance(command.value, str):
+        words = command.value.split()
+        return bool(words) and words[0] == "git"
     return (
         isinstance(command, ast.List)
         and bool(command.elts)
         and isinstance(command.elts[0], ast.Constant)
         and command.elts[0].value == "git"
     )
+
+
+def _command_expressions(node: ast.Call) -> list[ast.expr]:
+    """调用中可能承载命令的实参：首位置实参与 args= 关键字实参。"""
+    commands: list[ast.expr] = node.args[:1]
+    commands.extend(keyword.value for keyword in node.keywords if keyword.arg == "args")
+    return commands
 
 
 def _scan_git_invocations(package_root: Path) -> list[str]:
@@ -56,9 +64,11 @@ def _scan_git_invocations(package_root: Path) -> list[str]:
         with tokenize.open(path) as source_file:
             tree = ast.parse(source_file.read(), filename=str(path))
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Call) or not node.args:
+            if not isinstance(node, ast.Call):
                 continue
-            if _starts_with_git(node.args[0]) and relative not in GIT_SUBPROCESS_EXIT_MODULES:
+            if relative in GIT_SUBPROCESS_EXIT_MODULES:
+                continue
+            if any(_starts_with_git(command) for command in _command_expressions(node)):
                 offenders.append(f"{relative}:{node.lineno}")
     return offenders
 
@@ -72,12 +82,21 @@ def test_git_subprocess_calls_confined_to_git_exit_modules() -> None:
 
 
 def test_git_subprocess_gate_recognizes_violation_forms(tmp_path: Path) -> None:
-    """越界形态可被识别：裸串、列表首元素；出口模块与插件目录豁免。"""
+    """越界形态可被识别：裸串、shell 命令串、列表首元素与 args= 关键字；出口模块与插件目录豁免。"""
     package_root = tmp_path / "workflow_controller"
     offenders_dir = package_root / "core"
     offenders_dir.mkdir(parents=True)
     (offenders_dir / "offender.py").write_text(
-        'import subprocess\nsubprocess.run(["git", "status"])\nsubprocess.Popen("git", )\n',
+        "import os\n"
+        "import subprocess\n"
+        'subprocess.run(["git", "status"])\n'
+        'subprocess.Popen("git", )\n'
+        'subprocess.run("git status", shell=True)\n'
+        'os.system("git status")\n'
+        'subprocess.run(args=["git", "fetch"])\n'
+        'subprocess.run("hg status")\n'
+        'subprocess.run(["hg", "status"])\n'
+        'subprocess.run(args=["hg", "serve"])\n',
         encoding="utf-8",
     )
     exit_dir = package_root / "core" / "workspace"
@@ -89,4 +108,10 @@ def test_git_subprocess_gate_recognizes_violation_forms(tmp_path: Path) -> None:
         'subprocess.run(["git", "add", "-A"])\n', encoding="utf-8"
     )
 
-    assert _scan_git_invocations(package_root) == ["core/offender.py:2", "core/offender.py:3"]
+    assert _scan_git_invocations(package_root) == [
+        "core/offender.py:3",
+        "core/offender.py:4",
+        "core/offender.py:5",
+        "core/offender.py:6",
+        "core/offender.py:7",
+    ]

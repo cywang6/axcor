@@ -87,7 +87,11 @@ _SEPARATED_GIT_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")
 
 
 class WorkspaceRepositoryError(RuntimeError):
-    """私有仓操作失败：一律显式失败，不自动降级。"""
+    """私有仓操作失败：一律显式失败，不自动降级；git 子进程失败时 returncode 为其退出码。"""
+
+    def __init__(self, message: str, *, returncode: int | None = None) -> None:
+        super().__init__(message)
+        self.returncode = returncode
 
 
 @dataclass(frozen=True)
@@ -198,8 +202,11 @@ class WorkspaceRepository:
             raise WorkspaceRepositoryError(f"须传完整引用名：{ref!r}")
         try:
             return (await self._run_repo_git(["rev-parse", "--verify", "--quiet", ref])).strip()
-        except WorkspaceRepositoryError:
-            return None
+        except WorkspaceRepositoryError as exc:
+            # rev-parse --verify --quiet 仅在引用缺席时退出 1；其余退出码（如仓损坏 128）是真实故障
+            if exc.returncode == 1:
+                return None
+            raise
 
     async def _init_bare_repo(self) -> None:
         """初始化裸私有仓：禁 hooks、关换行归一、HEAD 指向集成线。"""
@@ -353,12 +360,15 @@ class WorkspaceRepository:
         except FileNotFoundError as exc:
             raise WorkspaceRepositoryError("git 不可用") from exc
         stdout_bytes, stderr_bytes = await proc.communicate(
-            input.encode("utf-8") if input is not None else None
+            input.encode("utf-8", "surrogateescape") if input is not None else None
         )
-        stdout = stdout_bytes.decode("utf-8", errors="replace")
-        stderr = stderr_bytes.decode("utf-8", errors="replace")
+        # stdout 可能被回灌给 git（ls-files 输出进 update-index/checkout）：surrogateescape
+        # 保证非 UTF-8 路径字节可往返；stderr 仅供诊断，替换非法字节即可
+        stdout = stdout_bytes.decode("utf-8", "surrogateescape")
+        stderr = stderr_bytes.decode("utf-8", "replace")
         if proc.returncode != 0:
             raise WorkspaceRepositoryError(
-                f"git {' '.join(args)} 失败（rc={proc.returncode}）：{stderr.strip()[-500:]}"
+                f"git {' '.join(args)} 失败（rc={proc.returncode}）：{stderr.strip()[-500:]}",
+                returncode=proc.returncode,
             )
         return stdout

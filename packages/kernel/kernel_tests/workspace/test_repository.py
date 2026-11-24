@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import io
+import os
 import subprocess
 import tarfile
 from typing import TYPE_CHECKING
@@ -47,6 +48,13 @@ def _run_git(args: Sequence[str], cwd: Path) -> str:
         text=True,
         check=False,
     )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout
+
+
+def _run_git_bytes(args: Sequence[str], cwd: Path, *, input: bytes | None = None) -> bytes:
+    """测试侧 git 调用（字节输出，路径不转码）：失败即断言。"""
+    proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, check=False, input=input)
     assert proc.returncode == 0, proc.stderr
     return proc.stdout
 
@@ -214,3 +222,65 @@ async def test_import_baseline_twice_fails_fast(tmp_path: Path) -> None:
 
     with pytest.raises(WorkspaceRepositoryError):
         await repository.import_baseline(writer_local_pathspecs=[])
+
+
+async def test_resolve_ref_missing_returns_none_but_corruption_raises(
+    tmp_path: Path,
+) -> None:
+    """引用缺失返回 None；仓库损坏（非引用缺席退出码）仍显式抛错。"""
+    root = tmp_path / "root"
+    root.mkdir()
+    _make_user_workspace(root)
+    repository, _ = await _imported_repository(root)
+
+    assert await repository.resolve_ref("refs/heads/nonexistent") is None
+
+    (repository.repo_dir / "HEAD").write_text("garbage\n", encoding="utf-8")
+    with pytest.raises(WorkspaceRepositoryError):
+        await repository.resolve_ref(ROOT_SEED_REF)
+
+
+async def test_git_output_round_trips_non_utf8_paths(tmp_path: Path) -> None:
+    """ls-files 输出的非 UTF-8 路径回灌 update-index（stdin）与路径匹配（argv）不损坏字节。"""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "plain.txt").write_text("x\n", encoding="utf-8")
+    repository = WorkspaceRepository(root, "run-1")
+    await repository.import_baseline(writer_local_pathspecs=())
+
+    # macOS 文件系统拒绝非法 UTF-8 文件名，经 cacheinfo 以字节 argv 注入索引
+    raw_path = b"caf\xe9.bin"
+    blob_sha = _run_git_bytes(
+        ["hash-object", "-w", "--stdin"], repository.repo_dir, input=b"payload"
+    ).strip()
+    subprocess.run(
+        [
+            b"git",
+            b"update-index",
+            b"--add",
+            b"--cacheinfo",
+            b"100644," + blob_sha + b"," + raw_path,
+        ],
+        cwd=root,
+        env={**os.environ, "GIT_DIR": str(repository.repo_dir), "GIT_WORK_TREE": str(root)},
+        check=True,
+    )
+
+    paths = await repository._list_index_paths(("*",))
+    assert b"caf\xe9.bin" in {os.fsencode(path) for path in paths}
+    decoded_path = next(path for path in paths if os.fsencode(path) == raw_path)
+
+    # argv 回灌（checkout 物化同源）：按解码后的路径匹配须命中
+    listed = await repository._run_repo_git(
+        ["ls-files", "-z", "--", decoded_path], work_tree=root, cwd=root
+    )
+    assert listed.strip("\0") == decoded_path
+
+    # stdin 回灌（剥除路径同源）：force-remove 须按原始字节命中
+    await repository._run_repo_git(
+        ["update-index", "-z", "--force-remove", "--stdin"],
+        work_tree=root,
+        cwd=root,
+        input="\0".join(paths) + "\0",
+    )
+    assert b"caf\xe9.bin" not in _run_git_bytes(["ls-files", "-z"], repository.repo_dir)
