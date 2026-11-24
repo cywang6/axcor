@@ -37,7 +37,7 @@ Accepted（2026-11-23）。S0a 评审进行中，评审修订直接落本文档�
 ### 主决策
 
 - **统一写者作用域树**：Graph Run 与独立单 session 共用同一模型——集成根作用域 → 主写者作用域（节点 executor / 单 session 主 agent）→ 子代理作用域。每个可能写文件的执行单元默认拥有独立 worktree；子代理完成时在父作用域写入闸门内、结果交付前合并回父作用域；Graph 节点验收通过并集成成功后才算 `passed`。
-- **回滚 = 异步确认链上的作用域操作组合**：节点回滚与子代理回滚共用同一异步动作/通知确认链与通用 `plan_restore`，由 `AbandonScope` / `RestoreScope` / `PrepareScopeWorkspace` 组合完成。未合并节点回滚 = 废弃目标作用域并在**当前集成头**重建（redo on latest integration head），严格局部（目标 scope epoch+1）；已合并回滚 = 集成线回退 + root epoch 递增的保守失效。崩溃恢复按三阶段 saga + 三态核对：**分叉即停，绝不自动 reset**。
+- **回滚 = 异步确认链上的作用域操作组合**：节点回滚与子代理回滚共用同一异步动作/通知确认链与通用 `plan_restore`，由 `AbandonScope` / `RestoreScope` / `PrepareScopeWorkspace` 组合完成。未合并节点回滚 = 废弃目标作用域并在**当前集成头**重建（redo on latest integration head），严格局部（目标 scope epoch+1）；已合并回滚 = 集成线回退 + 选择性保留换序重放（基线谱系不含目标的写者保留不重跑，spec §9.2.1）+ root epoch 递增。崩溃恢复按三阶段 saga + 三态核对：**分叉即停，绝不自动 reset**。
 - **冲突检测档位化，默认以可合并性为准**：配置项 `conflict_policy` 两档——`git_merge`（默认）下两个并发写者改同一 merge 路径、但三方合并干净（如一方改文件上半、另一方改下半）即放行，只有真实合并冲突才发 `fault.workspace_conflict`；`strict` 档退化为路径集重叠即违规（无论 Git 能否自动合并）。公共基准为各作用域的 `integration_base_commit`（不是含物化产物的 `scope_base_commit`），且限定 merge 路径集，杜绝本地产物误报。
 - **写入静止缩小为单作用域局部闸门**：RUNNING→QUIESCING→QUIESCED→操作→RUNNING；多数时点由「父 agent 停在 tool 调用上」结构性保证，仅后台进程需有界排空；父阻塞在 task result 上时不得延迟集成，超时以 `fault.scope_quiesce_failed` 收口，父 agent 绝不无限等待。
 - **能力迁入主代码，插件分阶段退出**：新增 `core/workspace/`、`core/checkpoints.py`（平铺，对偶 `core/runs.py`）、`core/restore/` 与通用动作/通知协议；迁移期插件经 SDK 端口调用核心（不 import `core`，遵守架构门禁）；`agent_traceback` 在全部开发完成、既有用户能力迁移完毕且测试通过后才退役删除，`file_provenance` 不在删除范围。
@@ -49,7 +49,7 @@ Accepted（2026-11-23）。S0a 评审进行中，评审修订直接落本文档�
 |---|---|
 | D1 单 session 文件态 | 统一作用域树（与 Graph 共用 worktree 隔离/检查点/恢复）；snapshot 只用于历史数据读取、离线导入等兼容场景 |
 | D2 worktree 无法安全建立 | **fail-fast 拒绝**，不自动降级保证 |
-| D3 已合并节点回滚（第一版） | **保守失效**：回退集成线，其后所有集成及基于失效基线的活动写者进入新 epoch 重跑；选择性保留（换序重放，基线谱系不含回滚目标的写者保留不重跑）为后续升级路径，安全论证见 spec §9.2.1，零 schema 预留 |
+| D3 已合并节点回滚 | **选择性保留（换序重放）**：回退集成线到目标建区基线，基线谱系（`integration_base_commit` 祖先链）含目标集成提交的写者失效重跑、不含的按原集成序重放保留、不重跑（安全论证与边界见 spec §9.2.1）；root epoch 递增，旧 epoch 请求照旧拒绝 |
 | D4 子代理默认策略 | **默认独立 worktree（writer）**；reader 是声明式优化（已发布 commit 的只读快照） |
 | D5 单 session 目录可见性 | **终态同步**：运行期间原目录保持基线不变，提供 live view 端点；session 完成后按三方同步（基线参照）写回原目录 |
 | D6 私有仓历史视图 | **默认单基线提交**（agent 的 `git log` 不见原项目历史）；需要历史的工作流可选开启只读历史导入 |

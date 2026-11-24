@@ -55,7 +55,7 @@ related_plans:
 - fail-fast（D2）：无法建立安全隔离时显式失败，不自动降级。
 - 架构门禁：`plugins.<name>` 禁止依赖 `core/driver/store/api/web`；核心禁止依赖具体插件；迁移期插件经 SDK 端口访问核心。
 
-产品决策 D1–D9（统一作用域树、fail-fast、保守失效、默认 writer、终态同步、单基线历史、双轨屏障、协作式隔离、冲突检测默认 `git_merge` 档）见 ADR-0001，本文直接引用。
+产品决策 D1–D9（统一作用域树、fail-fast、选择性保留、默认 writer、终态同步、单基线历史、双轨屏障、协作式隔离、冲突检测默认 `git_merge` 档）见 ADR-0001，本文直接引用。
 
 ## 2. 现状盘点与差距
 
@@ -499,7 +499,7 @@ nodes:
 | 回滚类型 | 统一操作 | 编排层附加动作 |
 |---|---|---|
 | 节点回滚（未合并） | 废弃目标作用域及后代 + 在当前 `root_integration_head` 重建（redo on latest integration head），目标 scope epoch+1 | Graph：目标节点回 pending、gen+1（reset 集 = `descendants(target) ∪ {target}`；验收失败回滚另含 `failed_node`；target 为动态子图节点时另含父 generator，特例见 §9.1.1）；失效集外作用域零变化 |
-| 节点回滚（已合并） | 集成线回退到目标检查点的 `integration_commit`（**不得用 `scope_base_commit`**）+ root epoch+1 | Graph：其后所有集成失效、基于失效基线的活动写者重跑（保守，D3） |
+| 节点回滚（已合并） | 集成线回退到目标检查点的 `integration_commit`（**不得用 `scope_base_commit`**）+ 保留者按原集成序换序重放 + root epoch+1 | Graph：基线谱系含目标集成提交的作用域失效重跑、不含的保留不重跑（选择性保留，D3，§9.2.1） |
 | Graph 内子代理回滚 | `RestoreScope(node_scope, dispatch_group_start)` + 截断父对话 | Graph：目标节点原验收失效，重绑新 executor/epoch |
 | 单 session 子代理回滚 | 同上（父作用域 = 主 agent 作用域） | 无 DAG，替换当前执行代次 |
 
@@ -553,9 +553,9 @@ sequenceDiagram
 
 **作用域树映射**：generator 没有新 attempt——其作用域与已集成成果（含已合并子图节点的集成）保留，仅子图目标节点及其后代的作用域被废弃并从当前集成头重建。这与「未合并回滚不动集成线」一致：generator 的产物既已集成，自然包含在新基线中。
 
-### 9.2 已合并节点回滚（保守失效，D3）
+### 9.2 已合并节点回滚（选择性保留：换序重放，D3）
 
-同一异步状态机，核心动作改为 `RestoreScope`（根作用域，回退集成线到目标 `integration_commit`）+ 逐失效作用域 `AbandonScope`（**先校验后 reset，拒绝发生在任何改动之前**）：
+失效集按**基线谱系**计算而非线上位置：已集成写者的 `integration_base_commit` 祖先链含目标的集成提交 → 失效重跑；不含 → 保留，其集成 diff 按原集成序重放到回退后的线上（安全性论证与边界见 §9.2.1）。同一异步状态机，核心动作为 `RestoreScope`（根作用域，回退集成线到目标 `integration_commit`）+ 保留者重放 + 逐失效作用域 `AbandonScope`（**先校验后 reset，拒绝发生在任何改动之前**）：
 
 ```text
 PREPARED(expected_root_head, expected_root_epoch)
@@ -564,16 +564,19 @@ PREPARED(expected_root_head, expected_root_epoch)
 → 校验 reset 目标（目标 scope_start 检查点记录的 integration_commit）：
   ① 已在宿主登记；② 属于当前集成线；③ 是当前 root_integration_head 的祖先；
   ④ 树内不含 writer_local 路径变更。任一不满足 → 停止报告分叉，绝不 reset
-→ reset 到该 integration_commit → GIT_WRITTEN(actual_root_head) → root_epoch+1
-→ 其后所有已集成作用域废弃（scope_epoch+1）；基于失效基线的活动写者作用域废弃
-→ ScopeRestored 通知 → Graph 保守失效其后全部任务 → 新代重建 → oplog 收口
+→ 计算失效集：谱系含目标集成提交的已集成作用域 + 基于失效基线的活动写者
+→ reset 到该 integration_commit → 按原集成序重放保留者 diff（构造性干净，§9.2.1）
+  → GIT_WRITTEN(actual_root_head) → root_epoch+1
+→ 失效集作用域废弃（scope_epoch+1）；保留者作用域不动
+  （其分支/worktree/检查点引用自有分支提交，不受线提交重写影响）
+→ ScopeRestored 通知 → Graph 失效集任务重跑、保留者不重跑 → 新代重建 → oplog 收口
 ```
 
-旧 root epoch 的完成回执、集成请求、回滚请求一律拒绝。子代理修改已合并进父作用域后的回滚向上传播：组检查点恢复使父分支回退；若已集成到根，按本节语义继续传播。各路径策略按 §6.2 恢复（checkpointed 随检查点、rebuildable 重跑、shared_* 回收租约、external 脚本核对）。选择性保留留待后续版本（换序重放的安全性论证与边界见 §9.2.1）。
+旧 root epoch 的完成回执、集成请求、回滚请求一律拒绝（换序省的是重跑，不是代次纪律）。子代理修改已合并进父作用域后的回滚向上传播：组检查点恢复使父分支回退；若已集成到根，按本节语义继续传播。各路径策略按 §6.2 恢复（checkpointed 随检查点、rebuildable 重跑、shared_* 回收租约、external 脚本核对）。
 
-### 9.2.1 选择性保留（后续版本）：换序重放的安全性论证与边界
+### 9.2.1 换序重放的安全性论证与边界
 
-D3 的保守失效是「选择性保留」策略的保守退化（不区分真假消费者、全部重跑）。典型场景：并行写者 A、B 从同一基线 H0 各自建区，A 先过验收先集成；回滚已集成的 A 时保留 B——由于集成顺序本来就是任意串行化点，换序重放 B 是安全的。论证分三层：
+典型场景：并行写者 A、B 从同一基线 H0 各自建区，A 先过验收先集成；回滚已集成的 A 时保留 B——由于集成顺序本来就是任意串行化点（谁先过验收谁先集成），换序重放 B 是安全的。论证分三层：
 
 1. **B 的被验证产物与 A 物理无关**：B 的 worktree 从 H0 检出，从未包含 A 的内容（可见性不变量：作用域只见建区时的树）；B 的 verifier 签收的就是 `H0 + diff(B)` 这个状态。
 2. **重放后的线恰好就是 B 被验证的状态**：重建线 = reset 到 H0 → 应用 `diff(H0, B.head)`——diff 套在 B 自己的基线上必然干净（构造性，非运气），且结果树（merge 路径集）逐字节等于 B 的 worktree 终态，即当初验收通过的内容。
@@ -592,7 +595,7 @@ D3 的保守失效是「选择性保留」策略的保守退化（不区分真�
 | B 尚未集成 | 不涉及换序——那是未合并回滚（§9.1），线不动，B 之后正常集成即可 |
 | 语义纠缠但文本干净 | 不存在：B 的 worktree 里没有 A 的内容，B 不可能引用 A 新增的函数/文件；「文本干净但语义依赖 A」的状态在 B 的验证环境里组装不出来 |
 
-升级路径零 schema 预留：`integration_base_commit` 已冻结在账本（§7），升级只换失效集计算式 + 加重放机械。
+schema 已就绪：谱系判据的数据源 `integration_base_commit` 已冻结在账本（§7），无需预留字段。
 
 ### 9.3 子代理级回滚（Graph 与单 session 共用）
 
@@ -810,7 +813,7 @@ D2 与 D5 是固定行为、不设配置项：无法安全建区一律 fail-fast
 4. **集成定序**：验收通过 → `awaiting_integration` → 集成成功才 `passed`；冲突时未通过。
 5. **路径策略四组合**（§6.2 表）行为正确；缺脚本的 rebuildable 自动按 checkpointed。
 6. **未合并节点回滚（异步）**：op 返回 operation_id；文件/账本/会话三态一致；scope epoch+1、旧回执被拒；失效集外零变化；重复请求幂等。
-7. **已合并回滚**：root epoch+1；旧 root epoch 请求被拒；各路径策略按 §6.2 恢复。
+7. **已合并回滚**：root epoch+1；旧 root epoch 请求被拒；谱系失效集正确（基线谱系不含目标的写者保留不重跑、含目标的失效重跑）；各路径策略按 §6.2 恢复。
 8. **子代理回滚**：dispatch_anchor 截断 + 组检查点文件恢复（同点）+ 绑定原 Run/作用域/新 epoch；失效范围 = 组检查点之后全部。
 9. **屏障能力矩阵**：无 cwd 注入 runtime 上 writer 子代理被拒绝启动；compat 模式标注 `late_barrier`。
 10. **幂等键**：同 `client_op_id` 返回原结果；`expected_epoch` 不匹配拒绝；合法新请求不误吞。

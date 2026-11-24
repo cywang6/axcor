@@ -73,7 +73,7 @@ related_specs:
 |---|---|---|---|---|
 | P4.1 | dispatch_group 一致性先行：⑤ 副作用工具前置拦截 + message 级组仲裁（`before_side_effect_tool`）、组检查点/`child_base_commit` 分离、屏障调用链（hook → 宿主 → RunCoordinator → 核心动作，有界等待）；`before_subagent_dispatch` 契约与五项能力矩阵落地（claude SDK 核验先行，opencode writer 子代理 fail-closed） | 派发屏障 + 组仲裁 + 单测 | P3.5 | 组检查点位于 message 内首个副作用之前；组恢复点不可变；无 cwd 注入 runtime 上 writer 子代理被拒绝启动 |
 | P4.2 | writer/reader 子代理作用域 + 子代理回滚（§9.4 异步确认链，Graph 与单 session 共用）+ `core/restore/` ConversationRestorer 迁移提炼（message 级截断 + seed + `start_session_with_resume` + Run/作用域/epoch 绑定）；`replay_dispatch` 仅限单副作用组 | 子代理回滚 + 集成测试 | P4.1 | 新 session 在 Graph 新代状态持久化之前不得创建（崩溃注入验证）；失效范围 = 组检查点之后全部；多副作用组 replay 请求被拒绝 |
-| P4.3 | 已合并节点回滚：集成线回退（先校验后 reset：已登记/属当前集成线/是当前 HEAD 祖先/不含 writer_local）+ root epoch 传播 + 保守失效 | 已合并回滚 + 集成测试 | P4.1 | 旧 root epoch 请求被拒；非法 reset 目标拒绝后根 HEAD/工作树/epoch/Graph 状态不变 |
+| P4.3 | 已合并节点回滚：集成线回退（先校验后 reset：已登记/属当前集成线/是当前 HEAD 祖先/不含 writer_local）+ 谱系失效集计算 + 保留者按原集成序换序重放 + root epoch 传播 | 已合并回滚 + 集成测试 | P4.1 | 旧 root epoch 请求被拒；非法 reset 目标拒绝后根 HEAD/工作树/epoch/Graph 状态不变；基线谱系不含目标的写者保留不重跑、含目标的失效重跑 |
 
 ### P5：单 session 迁移 + 插件退出
 
@@ -106,7 +106,7 @@ related_specs:
 | 15 | S3e | e2e 联调与验收：fix-findings 全链路 + 整图完成后从头新一轮（e2e 测试代码在本仓 `tests/e2e/`，联调跨仓） | P3.5 | S3b、S3d | §7 验收标准全过；worktree 成本实测回填 | ☐ |
 | 16 | S4a | dispatch_group + ⑤ 副作用屏障 + 屏障调用链 + 能力矩阵落地（claude SDK 核验，opencode fail-closed） | P4.1 | S3e | 组检查点先于首个副作用；无 cwd 注入拒绝 writer 子代理 | ☐ |
 | 17 | S4b | writer/reader 子代理作用域 + 子代理回滚异步确认链 + ConversationRestorer 迁移提炼 + replay_dispatch 单组限制 | P4.2 | S4a | 定序崩溃注入通过；多副作用组 replay 拒绝 | ☐ |
-| 18 | S4c | 已合并回滚：先校验后 reset + root epoch 传播 + 保守失效 | P4.3 | S4a | 非法目标拒绝后零改动；旧 root epoch 请求被拒 | ☐ |
+| 18 | S4c | 已合并回滚：先校验后 reset + 谱系失效集计算 + 保留者按原集成序换序重放 + root epoch 传播 | P4.3 | S4a | 非法目标拒绝后零改动；旧 root epoch 请求被拒；谱系不含目标的保留者不重跑、含目标的失效重跑 | ☐ |
 | 19 | S5a | 单 session 迁移：作用域树接入 + 终态三方同步 + live view 端点 | P5.1 | S4b | D5 行为与三方同步验收 | ☐ |
 | 20 | S5b | 能力迁移：对话恢复/文件预览/历史检查点/清理/import-db 独立 + 兼容读取器（旧 `checkpoints` 表历史行读取在此实现，S1d 只保证旧表留存） | P5.2 | S5a | 对外端点等价；重放/import 不回退 | ☐ |
 | 21 | S5c | 删除 `agent_traceback` 插件，snapshot 兼容模式收尾 | P5.3 | S5b 且全部开发完成 | 全量测试与 e2e 通过后插件目录出仓 | ☐ |
@@ -117,7 +117,7 @@ related_specs:
 - **M1（P1）**：临时仓上基线含未提交+未跟踪+内部 git 保留路径；作用域 CRUD/epoch/幂等/闸门单测通过；fake 编排经协议建区/集成；saga 三阶段崩溃注入通过。
 - **M2（P2）**：双节点并行写不相交路径隔离+按序集成；git_merge 档同文件不相交 hunk 并行写自动合并放行、真实合并冲突检出，strict 档同文件并行写（含 Git 可自动合并）检出；writer_local 修改不误报冲突；异步回滚幂等、旧 epoch 回执被拒、失效集外零变化；验收失败回滚不撤已集成成果（spec §9）；动态子图回滚特例符合 spec §9.1.1；旧单 session 与插件路径零改动。
 - **M3（P3）**：fix-findings e2e 跑通（超时→暂停→导出→修复→异步回滚→resume→下游继续）；重复回滚幂等；worktree 实际成本评估完成，P4/P5 节奏据此确认。
-- **M4（P4）**：规格 §17.1 第 8/23/24/28/31–35 项验收通过；无 cwd 注入 runtime 上 writer 子代理被拒绝启动；已合并回滚后旧 root epoch 请求被拒、reset 目标为集成线祖先；失效范围 = 组检查点之后全部。
+- **M4（P4）**：规格 §17.1 第 8/23/24/28/31–35 项验收通过；无 cwd 注入 runtime 上 writer 子代理被拒绝启动；已合并回滚后旧 root epoch 请求被拒、reset 目标为集成线祖先、谱系失效集正确（不含目标的保留者不重跑）；失效范围 = 组检查点之后全部。
 - **M5（P5）**：全部现有对外端点有主 Web 等价物；单 session 重放/import 迁移前后两点不回退；全部开发完成且全量测试与 e2e 通过后，`agent_traceback` 目录删除退役。
 
 ### 4.2 新增门禁
@@ -191,3 +191,4 @@ D7 双轨（opencode 上游推动 + 宿主接管 task 工具 spike）与 P4 并�
 | 2026-11-24 | 单值配置项移除（需求方意见）：`on_unsafe_workspace`、`single_session.root_sync` 出配置面（连同 `single_session:` 节），D2/D5 改为 spec §15 明文固定行为 | 同上 | 等待评审关闭 |
 | 2026-11-24 | S0a 三轮落档：`path_set` 档名回退为 `strict`（需求方意见）；§4 表 S2b/S2c 并行修复；§7 验收项计数 1–38；风险表 S3c 前置改 S2w；P1.4 验收与 S1d 口径统一；动作词表自洽（§9.1 改用 AbandonScope→ScopeAbandoned，RestoreCommitted 入 §5.2 动作表）；§6.1 状态机补 Integrated/Released→Discarded；显式已合并回滚 P4.3 前明确拒绝；claims×档位 2×2 写死；目录评审四微调落档（`core/checkpoints.py` 平铺、restore/ 边界、oplog 横切声明、git 出口收敛 + 新门禁） | 同上 | 等待评审关闭 |
 | 2026-11-24 | 补选择性保留（换序重放）安全性论证与边界（spec §9.2.1，回应「并行写者同基线、回滚先到者是否拖累后到者」）；ADR D3 行注明升级路径 | 同上 | 等待评审关闭 |
+| 2026-11-24 | D3 改写（需求方确认）：第一版即选择性保留——失效集按基线谱系计算、保留者按原集成序换序重放；spec §9 表/§9.2 流程/§9.2.1 转为正式机制、验收 #7，ADR D3 与主决策，plan P4.3/S4c/M4 同步 | 同上 | 等待评审关闭 |
