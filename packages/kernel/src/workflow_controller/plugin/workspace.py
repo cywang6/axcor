@@ -42,6 +42,7 @@ __all__ = [
     "RestoreScope",
     "RestoreSessionBound",
     "RetractIntegrationLine",
+    "RetractTarget",
     "ScopeAbandoned",
     "ScopeIntegrated",
     "ScopeIntegrationRejected",
@@ -177,16 +178,24 @@ class RestoreScope(RunAction):
 
 
 @dataclass(frozen=True)
-class RetractIntegrationLine(RunAction):
-    """集成线回退动作：宿主回退集成线到目标检查点的集成提交。
+class RetractTarget:
+    """集成线回退的单个撤回目标：作用域与其建区基线检查点。"""
 
-    先校验后 reset（目标已登记、属当前集成线、是当前头祖先、区间不
-    含自建路径变更），保留者按原集成序换序重放，根代次 +1、失效作
-    用域废弃；expected_root_epoch 为旧根代次，不匹配拒绝。
+    scope_id: str
+    checkpoint_id: str
+
+
+@dataclass(frozen=True)
+class RetractIntegrationLine(RunAction):
+    """集成线回退动作：宿主把集成线回退到目标集建区基线的最早者。
+
+    逐目标先校验后 reset（在册、属当前集成线、是当前头祖先、区间不
+    含自建路径变更），任一不满足零改动拒绝；保留者按原集成序换序重
+    放，根代次 +1、失效作用域废弃；expected_root_epoch 为旧根代次，
+    不匹配拒绝。
     """
 
-    checkpoint_id: str
-    target_scope_id: str
+    targets: tuple[RetractTarget, ...]
     expected_root_epoch: int
     client_op_id: str
     context: str | None = None
@@ -207,8 +216,9 @@ class ScopeRestored(RunNotification):
 class IntegrationLineRetracted(RunNotification):
     """集成线回退完成通知：新线头、新根代次与失效/保留划分。
 
-    invalidated 为失效作用域及其新代次（目标在列），preserved 为按
-    原集成序重放的保留者（不重跑）。
+    target_commit 为回退点（各撤回目标建区基线在首父链上的最早者）；
+    invalidated 为失效作用域及其新代次（全部撤回目标在列），preserved
+    为按原集成序重放的保留者（不重跑）。
     """
 
     new_root_head: str

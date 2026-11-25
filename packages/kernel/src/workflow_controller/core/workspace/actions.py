@@ -165,8 +165,9 @@ class ScopeAbandoned:
 class IntegrationLineRetracted:
     """集成线回退完成通知：新线头、新根代次与失效/保留划分。
 
-    invalidated 为失效作用域及其新代次（目标在列），preserved 为按
-    原集成序重放的保留者；保留者作用域、分支与检查点不动。
+    target_commit 为回退点（各撤回目标建区基线在首父链上的最早者）；
+    invalidated 为失效作用域及其新代次（全部撤回目标在列），preserved
+    为按原集成序重放的保留者；保留者作用域、分支与检查点不动。
     """
 
     new_root_head: str

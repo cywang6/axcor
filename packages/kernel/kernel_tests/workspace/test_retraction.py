@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from workflow_controller.core.workspace.actions import ScopeIntegrated
-from workflow_controller.core.workspace.manager import WorkspaceManagerError
+from workflow_controller.core.workspace.manager import RetractTarget, WorkspaceManagerError
 from workflow_controller.core.workspace.repository import ROOT_INTEGRATION_REF
 from workflow_controller.core.workspace.scope_tree import ScopeState, ScopeTreeError
 
@@ -77,8 +77,7 @@ class _LineageSite:
         self, *, client_op_id: str = "retract-1", epoch: int = 1
     ) -> IntegrationLineRetracted:
         return await self.manager.retract_integration_line(
-            target_scope_id="node-a",
-            target_commit=self.bases["node-a"],
+            targets=(RetractTarget(scope_id="node-a", base_commit=self.bases["node-a"]),),
             expected_root_epoch=epoch,
             client_op_id=client_op_id,
         )
@@ -202,8 +201,7 @@ async def test_retraction_rejections_leave_zero_change(tmp_path: Path) -> None:
     b_branch_head = run_git(["rev-parse", "scope/node-b"], site.repository.repo_dir).strip()
     with pytest.raises(WorkspaceManagerError, match="不属于当前集成线"):
         await site.manager.retract_integration_line(
-            target_scope_id="node-a",
-            target_commit=b_branch_head,
+            targets=(RetractTarget(scope_id="node-a", base_commit=b_branch_head),),
             expected_root_epoch=1,
             client_op_id="retract-x1",
         )
@@ -211,8 +209,7 @@ async def test_retraction_rejections_leave_zero_change(tmp_path: Path) -> None:
     # ③ 目标为当前集成头：非严格祖先（空集成目标的形态）
     with pytest.raises(WorkspaceManagerError, match="严格）祖先"):
         await site.manager.retract_integration_line(
-            target_scope_id="node-a",
-            target_commit=head_before or "",
+            targets=(RetractTarget(scope_id="node-a", base_commit=head_before or ""),),
             expected_root_epoch=1,
             client_op_id="retract-x2",
         )
@@ -222,8 +219,7 @@ async def test_retraction_rejections_leave_zero_change(tmp_path: Path) -> None:
     try:
         with pytest.raises(WorkspaceManagerError, match="自建路径变更"):
             await site.manager.retract_integration_line(
-                target_scope_id="node-a",
-                target_commit=site.bases["node-a"],
+                targets=(RetractTarget(scope_id="node-a", base_commit=site.bases["node-a"]),),
                 expected_root_epoch=1,
                 client_op_id="retract-x3",
             )
@@ -235,8 +231,7 @@ async def test_retraction_rejections_leave_zero_change(tmp_path: Path) -> None:
     try:
         with pytest.raises(WorkspaceManagerError, match="未提交变化"):
             await site.manager.retract_integration_line(
-                target_scope_id="node-a",
-                target_commit=site.bases["node-a"],
+                targets=(RetractTarget(scope_id="node-a", base_commit=site.bases["node-a"]),),
                 expected_root_epoch=1,
                 client_op_id="retract-x4",
             )
@@ -280,3 +275,148 @@ async def test_retraction_replays_multiple_preservers_in_original_order(
     for name in ("b.md", "c.md"):
         assert (site.root / "design" / name).exists()
     assert not (site.root / "design" / "a.md").exists()
+
+
+async def test_multi_target_rejection_leaves_zero_change(tmp_path: Path) -> None:
+    """任一目标不合格即整批拒绝零改动：单独合法的 a 也不回退（全有或全无）。"""
+    site = _LineageSite(tmp_path)
+    await site.build()
+    facts = await _zero_change_facts(site)
+
+    # e 未集成：目标集第二个目标不合格，整批拒绝
+    with pytest.raises(WorkspaceManagerError, match="未集成：node-e"):
+        await site.manager.retract_integration_line(
+            targets=(
+                RetractTarget(scope_id="node-a", base_commit=site.bases["node-a"]),
+                RetractTarget(scope_id="node-e", base_commit=site.bases["node-e"]),
+            ),
+            expected_root_epoch=1,
+            client_op_id="retract-multi-x1",
+        )
+    head_after, tree_after, ledger_after = await _zero_change_facts(site)
+    assert head_after == facts[0]
+    assert tree_after == facts[1]
+    assert ledger_after == facts[2]
+
+
+async def test_multi_target_rejection_on_duplicate_scope(tmp_path: Path) -> None:
+    """目标集含重复作用域按非法输入拒绝。"""
+    site = _LineageSite(tmp_path)
+    await site.build()
+    with pytest.raises(WorkspaceManagerError, match="重复作用域"):
+        await site.manager.retract_integration_line(
+            targets=(
+                RetractTarget(scope_id="node-a", base_commit=site.bases["node-a"]),
+                RetractTarget(scope_id="node-a", base_commit=site.bases["node-a"]),
+            ),
+            expected_root_epoch=1,
+            client_op_id="retract-multi-x2",
+        )
+
+
+async def test_multi_target_retraction_advances_in_one_action(tmp_path: Path) -> None:
+    """多目标一次动作完成回退：目标与谱系吸收写者全失效换代，根代次 +1。"""
+    site = _LineageSite(tmp_path)
+    await site.build()
+
+    result = await site.manager.retract_integration_line(
+        targets=(
+            RetractTarget(scope_id="node-a", base_commit=site.bases["node-a"]),
+            RetractTarget(scope_id="node-b", base_commit=site.bases["node-b"]),
+        ),
+        expected_root_epoch=1,
+        client_op_id="retract-multi",
+    )
+    # a/b 同基线：回退点即该基线，无保留者时新头就是回退点本身
+    assert result.new_root_epoch == 2
+    assert result.target_commit == site.bases["node-a"]
+    assert result.new_root_head == site.bases["node-a"]
+    # 失效集 = 目标集 ∪ 谱系吸收（下游 d 与失效活动写者 f）；基线干净的 e 不入失效面
+    assert {scope for scope, _epoch in result.invalidated} == {
+        "node-a",
+        "node-b",
+        "node-d",
+        "node-f",
+    }
+    assert result.preserved == ()
+
+    # 失效作用域各自换代并移除工作区；e 零触碰
+    for key in ("node-a", "node-b", "node-d", "node-f"):
+        record = await site.manager.get_scope(key)
+        assert record is not None
+        assert record.state is ScopeState.DISCARDED
+        assert record.scope_epoch == 2
+        assert not (site.repository.workspaces_dir / key).exists()
+    e_scope = await site.manager.get_scope("node-e")
+    assert e_scope is not None
+    assert e_scope.state is ScopeState.ACTIVE
+    assert e_scope.scope_epoch == 1
+    assert (site.repository.workspaces_dir / "node-e").exists()
+
+    # 根检出：目标与谱系吸收者的产物一并撤回，基线文件仍在
+    for name in ("a.md", "b.md", "d.md"):
+        assert not (site.root / "design" / name).exists()
+    assert (site.root / "design" / "base.md").read_text(encoding="utf-8") == "base\n"
+
+
+async def test_multi_target_retraction_point_is_earliest_baseline(tmp_path: Path) -> None:
+    """回退点取各目标建区基线在首父链上的最早者：a 基线早于 b 基线 → T = a 的基线。"""
+    site = _LineageSite(tmp_path)
+    await site.orchestrator.bootstrap_root()
+    ws_a = await site.prepare("node-a")
+    ws_p = await site.prepare("node-p")
+    (ws_a / "design" / "a.md").write_text("from-a\n", encoding="utf-8")
+    (ws_p / "design" / "p.md").write_text("from-p\n", encoding="utf-8")
+    await site.integrate("node-a")
+    ws_b = await site.prepare("node-b")  # 建区基线已含 a 的集成
+    (ws_b / "design" / "b.md").write_text("from-b\n", encoding="utf-8")
+    await site.integrate("node-b")
+    await site.integrate("node-p")  # 保留者最后集成
+
+    result = await site.manager.retract_integration_line(
+        targets=(
+            RetractTarget(scope_id="node-a", base_commit=site.bases["node-a"]),
+            RetractTarget(scope_id="node-b", base_commit=site.bases["node-b"]),
+        ),
+        expected_root_epoch=1,
+        client_op_id="retract-earliest",
+    )
+    # 回退点 = a 的建区基线（最早者）；b 的基线（更晚）不被采用
+    assert site.bases["node-b"] != site.bases["node-a"]
+    assert result.target_commit == site.bases["node-a"]
+    assert {scope for scope, _epoch in result.invalidated} == {"node-a", "node-b"}
+    # p 基线不含任一目标的集成提交：保留并按原集成序重放
+    assert result.preserved == ("node-p",)
+    assert (site.root / "design" / "p.md").read_text(encoding="utf-8") == "from-p\n"
+    assert not (site.root / "design" / "a.md").exists()
+    assert not (site.root / "design" / "b.md").exists()
+
+
+async def test_multi_target_retraction_idempotent_replay_and_conflict(tmp_path: Path) -> None:
+    """幂等缓存：同操作号同目标集（乱序重放含内）返回原结果；异目标集按冲突拒绝。"""
+    site = _LineageSite(tmp_path)
+    await site.build()
+    targets = (
+        RetractTarget(scope_id="node-a", base_commit=site.bases["node-a"]),
+        RetractTarget(scope_id="node-b", base_commit=site.bases["node-b"]),
+    )
+    result = await site.manager.retract_integration_line(
+        targets=targets, expected_root_epoch=1, client_op_id="retract-multi"
+    )
+
+    replay = await site.manager.retract_integration_line(
+        targets=targets, expected_root_epoch=1, client_op_id="retract-multi"
+    )
+    assert replay == result
+
+    # 目标集相同但顺序不同：规范形一致，仍返回原结果
+    permuted = await site.manager.retract_integration_line(
+        targets=(targets[1], targets[0]), expected_root_epoch=1, client_op_id="retract-multi"
+    )
+    assert permuted == result
+
+    # 同操作号携带不同目标集：按冲突拒绝，不返回旧结果
+    with pytest.raises(WorkspaceManagerError, match="已绑定不同的回退请求"):
+        await site.manager.retract_integration_line(
+            targets=(targets[0],), expected_root_epoch=1, client_op_id="retract-multi"
+        )

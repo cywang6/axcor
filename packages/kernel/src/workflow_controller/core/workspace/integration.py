@@ -271,6 +271,17 @@ class IntegrationCoordinator:
         """集成线首父链上的全部提交（含 head 与基线种子）。"""
         return {commit for commit, _subject in await self._first_parent_subjects(head)}
 
+    async def earliest_line_commit(self, head: str, commits: Sequence[str]) -> str | None:
+        """求一组提交在集成线首父链上的最早者（离头最远）；缺席任一返回 None。"""
+        order = {
+            commit: index
+            for index, (commit, _subject) in enumerate(await self._first_parent_subjects(head))
+        }
+        positions = [order.get(commit) for commit in commits]
+        if any(position is None for position in positions):
+            return None
+        return commits[max(range(len(commits)), key=lambda index: positions[index])]
+
     async def _first_parent_subjects(self, head: str) -> list[tuple[str, str]]:
         """首父链的 (提交, 主题) 对，按时间倒序（新在前）。"""
         out = await self._run_repo_git(["log", "--first-parent", "--pretty=%H%x00%s", head])

@@ -105,7 +105,7 @@ from workflow_controller.core.workspace.dispatch_groups import (
     ChildDispatchRequest,
     ReplayRejectedError,
 )
-from workflow_controller.core.workspace.manager import ScopeQuiesceFailedError
+from workflow_controller.core.workspace.manager import RetractTarget, ScopeQuiesceFailedError
 from workflow_controller.core.workspace.tree_runtime import (
     PendingSubagentRestore,
     WorkspaceTreeRuntime,
@@ -3036,11 +3036,12 @@ class RunCoordinator:
     async def _execute_integration_retract(
         self, rt: RunRuntime, action: RetractIntegrationLine
     ) -> None:
-        """执行集成线回退：目标检查点先校验登记，先校验后 reset 回退。
+        """执行集成线回退：逐目标核验检查点后先校验后 reset 回退。
 
-        检查点须为目标作用域的 scope_start 行（建区时的集成头即回退
-        目标提交）；回退结果以失效/保留划分回投，编排层据此重排失效
-        集并保留保留者。
+        每个目标须为其作用域的 scope_start 行（建区时的集成头即该目标
+        建区基线提交）；回退点由全部目标建区基线在首父链上的最早者决
+        定，回退结果以失效/保留划分回投，编排层据此重排失效集并保留
+        保留者。
         """
         tree = await self._ensure_workspace_tree(rt)
         if tree is None:
@@ -3055,20 +3056,27 @@ class RunCoordinator:
             )
             return
         try:
-            checkpoint = await tree.checkpoints.get(action.checkpoint_id)
-            if checkpoint is None:
-                raise ValueError(f"回退目标检查点未在账本登记：{action.checkpoint_id}")
-            if checkpoint.trigger is not CheckpointTrigger.SCOPE_START:
-                raise ValueError(f"回退目标须为 scope_start 检查点：{action.checkpoint_id}")
-            if checkpoint.scope_id != action.target_scope_id:
-                raise ValueError(
-                    f"检查点不属于回退目标作用域：{action.checkpoint_id}（{checkpoint.scope_id}）"
+            targets: list[RetractTarget] = []
+            for entry in action.targets:
+                checkpoint = await tree.checkpoints.get(entry.checkpoint_id)
+                if checkpoint is None:
+                    raise ValueError(f"回退目标检查点未在账本登记：{entry.checkpoint_id}")
+                if checkpoint.trigger is not CheckpointTrigger.SCOPE_START:
+                    raise ValueError(f"回退目标须为 scope_start 检查点：{entry.checkpoint_id}")
+                if checkpoint.scope_id != entry.scope_id:
+                    raise ValueError(
+                        f"检查点不属于回退目标作用域：{entry.checkpoint_id}（{checkpoint.scope_id}）"
+                    )
+                if not checkpoint.integration_commit:
+                    raise ValueError(f"检查点缺少集成提交引用：{entry.checkpoint_id}")
+                targets.append(
+                    RetractTarget(
+                        scope_id=entry.scope_id,
+                        base_commit=checkpoint.integration_commit,
+                    )
                 )
-            if not checkpoint.integration_commit:
-                raise ValueError(f"检查点缺少集成提交引用：{action.checkpoint_id}")
             result = await tree.manager.retract_integration_line(
-                target_scope_id=action.target_scope_id,
-                target_commit=checkpoint.integration_commit,
+                targets=targets,
                 expected_root_epoch=action.expected_root_epoch,
                 client_op_id=action.client_op_id,
             )

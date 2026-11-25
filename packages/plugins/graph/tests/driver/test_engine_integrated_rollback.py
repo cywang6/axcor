@@ -28,6 +28,7 @@ from workflow_controller.plugin.workspace import (
     PrepareScopeWorkspace,
     RestoreCommitted,
     RetractIntegrationLine,
+    RetractTarget,
     ScopeIntegrated,
     ScopeTerminalCommitted,
     ScopeWorkspacePrepared,
@@ -145,8 +146,9 @@ def test_integrated_chain_retracts_invalidates_and_preserves(tmp_path: Path) -> 
     actions = decide(driver)
     retracts = pick(actions, RetractIntegrationLine)
     assert len(retracts) == 1
-    assert retracts[0].target_scope_id == "a-w1"
-    assert retracts[0].checkpoint_id == "a-w1:scope_start:e1"
+    assert retracts[0].targets == (
+        RetractTarget(scope_id="a-w1", checkpoint_id="a-w1:scope_start:e1"),
+    )
     assert retracts[0].expected_root_epoch == 1
     assert _op_phase(driver) == "retracting"
 

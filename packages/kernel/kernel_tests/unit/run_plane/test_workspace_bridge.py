@@ -40,6 +40,7 @@ from workflow_controller.plugin.workspace import (
     PrepareScopeWorkspace,
     RestoreCommitted,
     RetractIntegrationLine,
+    RetractTarget,
     ScopeAbandoned,
     ScopeIntegrated,
     ScopeIntegrationRejected,
@@ -880,8 +881,9 @@ def _retraction_plan(
         if failures:
             return [
                 RetractIntegrationLine(
-                    checkpoint_id="node-a:scope_start:e1",
-                    target_scope_id="node-a",
+                    targets=(
+                        RetractTarget(scope_id="node-a", checkpoint_id="node-a:scope_start:e1"),
+                    ),
                     expected_root_epoch=1,
                     client_op_id="op-retract-2",
                     context="node=a",
@@ -892,8 +894,7 @@ def _retraction_plan(
             checkpoint = "node-a:scope_start:missing" if bogus_first else "node-a:scope_start:e1"
             return [
                 RetractIntegrationLine(
-                    checkpoint_id=checkpoint,
-                    target_scope_id="node-a",
+                    targets=(RetractTarget(scope_id="node-a", checkpoint_id=checkpoint),),
                     expected_root_epoch=1,
                     client_op_id="op-retract-1",
                     context="node=a",
@@ -973,3 +974,98 @@ async def test_integration_retract_missing_checkpoint_rejected_zero_change(tmp_p
     retracted = _notes_of(h.driver, IntegrationLineRetracted)
     assert len(retracted) == 1
     assert retracted[0].invalidated and retracted[0].new_root_epoch == 2
+
+
+def _multi_retraction_plan(work_root: Path, *, bogus_second: bool = False):
+    """双写者集成后一次回退两个目标的动作计划（可注入第二目标检查点缺席）。"""
+
+    def plan(driver: ProbeDriver) -> list[RunAction] | None:
+        if _notes_of(driver, IntegrationLineRetracted) or _notes_of(driver, WorkspaceActionFailed):
+            return None
+        integrated = _notes_of(driver, ScopeIntegrated)
+        if len(integrated) >= 2:
+            second = "node-b:scope_start:missing" if bogus_second else "node-b:scope_start:e1"
+            return [
+                RetractIntegrationLine(
+                    targets=(
+                        RetractTarget(scope_id="node-a", checkpoint_id="node-a:scope_start:e1"),
+                        RetractTarget(scope_id="node-b", checkpoint_id=second),
+                    ),
+                    expected_root_epoch=1,
+                    client_op_id="op-retract-1",
+                    context="node=a",
+                )
+            ]
+        terminals = _notes_of(driver, ScopeTerminalCommitted)
+        if len(terminals) >= 2:
+            return [
+                IntegrateScope(scope_id="node-a", client_op_id="op-i1", context="node=a"),
+                IntegrateScope(scope_id="node-b", client_op_id="op-i2", context="node=b"),
+            ]
+        prepared = _notes_of(driver, ScopeWorkspacePrepared)
+        if len(prepared) >= 2:
+            for note in prepared:
+                (Path(note.workspace_path) / f"{note.scope_id}.md").write_text(
+                    f"from-{note.scope_id}\n", encoding="utf-8"
+                )
+            return [
+                CommitScopeTerminal(scope_id="node-a", client_op_id="op-t1", context="node=a"),
+                CommitScopeTerminal(scope_id="node-b", client_op_id="op-t2", context="node=b"),
+            ]
+        return [
+            PrepareScopeWorkspace(
+                config=_tree_config(work_root),
+                scope_key="node-a",
+                client_op_id="op-p1",
+                context="node=a",
+            ),
+            PrepareScopeWorkspace(
+                config=_tree_config(work_root),
+                scope_key="node-b",
+                client_op_id="op-p2",
+                context="node=b",
+            ),
+        ]
+
+    return plan
+
+
+async def test_multi_target_retract_executes_through_bridge(tmp_path: Path) -> None:
+    """多目标回退经桥执行：两个目标一并失效换代、根代次 +1、产出全部撤回。"""
+    work_root = tmp_path / "root"
+    work_root.mkdir()
+    (work_root / "base.md").write_text("base\n", encoding="utf-8")
+
+    h = BridgeHarness(tmp_path, _multi_retraction_plan(work_root))
+    await h.start_and_finish()
+
+    retracted = _notes_of(h.driver, IntegrationLineRetracted)
+    assert len(retracted) == 1
+    assert retracted[0].new_root_epoch == 2
+    assert {scope for scope, _epoch in retracted[0].invalidated} == {"node-a", "node-b"}
+    assert retracted[0].preserved == ()
+    assert not (work_root / "node-a.md").exists()
+    assert not (work_root / "node-b.md").exists()
+    assert (work_root / "base.md").read_text(encoding="utf-8") == "base\n"
+    assert not _notes_of(h.driver, WorkspaceActionFailed)
+
+
+async def test_multi_target_retract_second_target_unregistered_rejected(
+    tmp_path: Path,
+) -> None:
+    """第二目标检查点未登记：明确拒绝且零改动（双目标产物与根代次原样）。"""
+    work_root = tmp_path / "root"
+    work_root.mkdir()
+    (work_root / "base.md").write_text("base\n", encoding="utf-8")
+
+    h = BridgeHarness(tmp_path, _multi_retraction_plan(work_root, bogus_second=True))
+    await h.start_and_finish()
+
+    failures = _notes_of(h.driver, WorkspaceActionFailed)
+    assert len(failures) == 1
+    assert failures[0].action == "RetractIntegrationLine"
+    assert "node-b:scope_start:missing" in failures[0].error
+    assert not _notes_of(h.driver, IntegrationLineRetracted)
+    # 零改动：两位目标的集成产出仍在根检出
+    assert (work_root / "node-a.md").read_text(encoding="utf-8") == "from-node-a\n"
+    assert (work_root / "node-b.md").read_text(encoding="utf-8") == "from-node-b\n"

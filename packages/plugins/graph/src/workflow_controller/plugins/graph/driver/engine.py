@@ -83,6 +83,7 @@ from workflow_controller.plugin.workspace import (
     RestoreScope,
     RestoreSessionBound,
     RetractIntegrationLine,
+    RetractTarget,
     ScopeAbandoned,
     ScopeIntegrated,
     ScopeIntegrationRejected,
@@ -2679,8 +2680,12 @@ class GraphDriver:
         self._state.upsert_operation(record)
         actions.append(
             RetractIntegrationLine(
-                checkpoint_id=record["checkpoint_id"],
-                target_scope_id=record["scope_id"],
+                targets=(
+                    RetractTarget(
+                        scope_id=record["scope_id"],
+                        checkpoint_id=record["checkpoint_id"],
+                    ),
+                ),
                 expected_root_epoch=int(record["expected_root_epoch"]),
                 client_op_id=record["retract_op_id"],
                 context=f"node={node_id}",

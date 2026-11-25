@@ -39,7 +39,7 @@ from workflow_controller.core.workspace.actions import (
     ScopeWorkspaceSpec,
 )
 from workflow_controller.core.workspace.integration import IntegrationCoordinator
-from workflow_controller.core.workspace.manager import WorkspaceManager
+from workflow_controller.core.workspace.manager import RetractTarget, WorkspaceManager
 from workflow_controller.core.workspace.manifest import WorkspaceManifest
 from workflow_controller.core.workspace.oplog import SagaOplog
 from workflow_controller.core.workspace.recovery import (
@@ -122,8 +122,7 @@ class _CrashSite:
 
     async def retract_a(self) -> None:
         await self.manager.retract_integration_line(
-            target_scope_id="node-a",
-            target_commit=self.bases["node-a"],
+            targets=(RetractTarget(scope_id="node-a", base_commit=self.bases["node-a"]),),
             expected_root_epoch=1,
             client_op_id="retract-crash",
         )
@@ -230,6 +229,60 @@ async def test_recovery_completes_retract_ledger_after_reset_crash(
     # 基线干净的活动写者不在失效面：工作区保留、状态活动
     assert states["node-w2"][0] is ScopeState.ACTIVE
     assert (site.repository.workspaces_dir / "node-w2").exists()
+
+
+async def test_recovery_completes_multi_target_retract_after_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """多目标回退在 reset 后、代次落账前崩溃：补账收口后同操作号重放返回原结果。"""
+    from workflow_controller.core.workspace.scope_tree import ScopeTree
+
+    site = _CrashSite(tmp_path)
+    await site.build()
+    ws_d = await site.prepare("node-d")
+    (ws_d / "design" / "d.md").write_text("from-d\n", encoding="utf-8")
+    await site.integrate("node-d")
+    targets = (
+        RetractTarget(scope_id="node-a", base_commit=site.bases["node-a"]),
+        RetractTarget(scope_id="node-b", base_commit=site.bases["node-b"]),
+    )
+
+    async def exploding(self: ScopeTree, *, expected_root_epoch: int) -> int:
+        raise RuntimeError("崩溃注入：reset 后 epoch 落账前")
+
+    monkeypatch.setattr(ScopeTree, "advance_root_epoch", exploding)
+    with pytest.raises(RuntimeError, match="崩溃注入"):
+        await site.manager.retract_integration_line(
+            targets=targets, expected_root_epoch=1, client_op_id="retract-multi-crash"
+        )
+    monkeypatch.undo()
+
+    # 崩溃现场：引用与根检出已回退（a/b/d 的产物撤回、保留者 w1 的产出在）
+    for name in ("node-a.md", "node-b.md", "node-d.md"):
+        assert not (site.root / "design" / name).exists()
+    assert (site.root / "design" / "node-w1.md").exists()
+
+    manager, report = await site.rebuild()
+    assert report.completed_op_ids == ["retract-multi-crash"]
+    assert report.root_epoch == 2
+    states = {r.scope_id: (r.state, r.scope_epoch) for r in await manager.list_scopes()}
+    # 两个目标与谱系吸收的下游 d 失效换代；同基线兄弟 w1 保留不动
+    assert states["node-a"] == (ScopeState.DISCARDED, 2)
+    assert states["node-b"] == (ScopeState.DISCARDED, 2)
+    assert states["node-d"] == (ScopeState.DISCARDED, 2)
+    assert states["node-w1"][0] is ScopeState.INTEGRATED
+    assert states["node-w2"][0] is ScopeState.ACTIVE
+
+    # 重载后的操作账命中已收口缓存：规范形目标集一致即返回原结果
+    replay = await manager.retract_integration_line(
+        targets=(targets[1], targets[0]), expected_root_epoch=1, client_op_id="retract-multi-crash"
+    )
+    assert replay.new_root_epoch == 2
+    assert {scope for scope, _epoch in replay.invalidated} == {
+        "node-a",
+        "node-b",
+        "node-d",
+    }
 
 
 async def test_recovery_abandons_uneffective_prepared_op(tmp_path: Path) -> None:
