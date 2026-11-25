@@ -17,12 +17,14 @@
 节点执行建模为阶段机：成员出生/等待、进程执行、产物读取与终态裁决全部
 经 run 平面动作派发，执行结果以通知回投推进阶段迁移。决策数学（就绪/
 传播/回滚/验收判定/提示词）在包内纯函数模块；本模块只持步进状态。
-回滚走异步确认链且按 kind 隔离三条：未合并链（AbandonScope → 失效计
+回滚走异步确认链且按 kind 隔离四条：未合并链（AbandonScope → 失效计
 划 → 重建）、子代理链（RestoreScope → 绑定恢复会话）、已合并链
-（RetractIntegrationLine 集成线回退 → 谱系失效集重排、保留者不重跑），
-op 只登记操作账并立即返回 operation_id，每一步都由 decide 驱动、回执
-接力。当前定义换装走 reload_definition op：工厂侧翻译成载荷、暂停态
-下纯换装，节点状态与运行档案原样保留。
+（RetractIntegrationLine 集成线回退 → 谱系失效集重排、保留者不重跑）、
+批量链（rollback_nodes 单 operation 多目标：先集成线回退落谱系失效计
+划，再逐目标废弃落计划切片，回执即落账），op 只登记操作账并立即返回
+operation_id，每一步都由 decide 驱动、回执接力。当前定义换装走
+reload_definition op：工厂侧翻译成载荷、暂停态下纯换装，节点状态与运
+行档案原样保留。
 """
 
 from __future__ import annotations
@@ -290,7 +292,8 @@ _TIMER_VERDICT = "verdict"
 
 # 回滚操作阶段：登记 → 废弃中（等 ScopeAbandoned）→ 重建中（等新工作区）→ 终态；
 # 子代理链：登记 → 恢复中（等 ScopeRestored）→ 绑定中（等 RestoreSessionBound）；
-# 已合并链：登记 → 回退中（等 IntegrationLineRetracted）→ 重建中（等新工作区）
+# 已合并链：登记 → 回退中（等 IntegrationLineRetracted）→ 重建中（等新工作区）；
+# 批量链：登记 → 回退中 → 废弃中（逐目标回执落切片）→ 重建中
 _OP_PENDING = "pending"
 _OP_ABANDONING = "abandoning"
 _OP_REBUILDING = "rebuilding"
@@ -798,6 +801,8 @@ class GraphDriver:
             }
         if op == "rollback_node":
             return self._register_rollback_op(args)
+        if op == "rollback_nodes":
+            return self._register_rollback_nodes_op(args)
         if op == "rollback_subagent":
             return self._register_subagent_rollback_op(args)
         if op == "get_operation":
@@ -1389,6 +1394,8 @@ class GraphDriver:
 
     def _on_workspace_abandoned(self, note: ScopeAbandoned, actions: list[RunAction]) -> None:
         """废弃回执：回滚操作链优先（失效计划落账），否则清档案补建区（重试路径）。"""
+        if self._apply_batch_abandoned_note(note, actions):
+            return
         if self._apply_restore_after_abandon(note, actions):
             return
         act = self._activity_by_context(note.context)
@@ -2591,6 +2598,8 @@ class GraphDriver:
     @staticmethod
     def _operation_view(record: Mapping[str, Any]) -> dict[str, Any]:
         """操作记录的对外形状（受理应答与状态查询共用）。"""
+        if record.get("kind") == "rollback_nodes":
+            return GraphDriver._batch_operation_view(record)
         return {
             "operation_id": record["operation_id"],
             "client_op_id": record["client_op_id"],
@@ -2614,9 +2623,17 @@ class GraphDriver:
         不静默吞。已合并链在登记态发集成线回退动作。
         """
         for record in self._state.operations().values():
+            kind = record.get("kind")
+            if kind == "rollback_nodes" and record.get("phase") in (
+                _OP_PENDING,
+                _OP_REBUILDING,
+            ):
+                # 批量链：登记态推进（转相位并同轮发动作），重建相逐轮收口判定；
+                # 废弃相位等回执落切片，不逐轮重发（防在途动作被重复执行）
+                self._advance_batch_restore_op(record, actions)
+                continue
             if record.get("phase") != _OP_PENDING:
                 continue
-            kind = record.get("kind")
             if kind == "rollback_node":
                 self._advance_unmerged_restore_op(record, actions)
             elif kind == "rollback_integrated":
@@ -2694,9 +2711,9 @@ class GraphDriver:
 
     def _demote_retracting_restore_ops(self) -> None:
         """恢复时把回退中相位退回登记态：重发按稳定操作号幂等——核心
-        侧已收口则返回原结果，未生效则照常执行。"""
+        侧已收口则返回原结果，未生效则照常执行（单目标与批量链同规则）。"""
         for record in self._state.operations().values():
-            if record.get("kind") != "rollback_integrated":
+            if record.get("kind") not in ("rollback_integrated", "rollback_nodes"):
                 continue
             if record.get("phase") != _OP_RETRACTING:
                 continue
@@ -2829,10 +2846,12 @@ class GraphDriver:
     ) -> None:
         """集成线回退回执：失效集落账重排、保留者不动，链进重建相。
 
-        失效节点按核心谱系划分解析（作用域 → 节点映射），reset 集即
-        失效节点集合而非 DAG 后代闭包——谱系不含目标的写者保持 passed
-        不重跑。
+        批量链回执先路由（context 前缀区分）；失效节点按核心谱系划分解
+        析（作用域 → 节点映射），reset 集即失效节点集合而非 DAG 后代闭
+        包——谱系不含目标的写者保持 passed 不重跑。
         """
+        if self._apply_batch_retract_note(note, actions):
+            return
         for record in self._state.operations().values():
             if record.get("kind") != "rollback_integrated" or record.get("phase") != _OP_RETRACTING:
                 continue
@@ -2923,6 +2942,597 @@ class GraphDriver:
             scheduler.derive_status_after_rollback(self._state.snapshot()),
         )
 
+    # ── 批量节点回滚异步状态机 ──────────────────────────────────
+
+    # 批量链动作的 context 前缀（与单目标链 node= 前缀互斥，回执互不误路由）
+    _BATCH_CTX_PREFIX = "batch="
+
+    def _register_rollback_nodes_op(self, args: Mapping[str, Any]) -> dict[str, Any]:
+        """批量回滚 op 受理：全量校验 + DAG 包含归并后登记操作账，零 I/O。
+
+        幂等键为 client_op_id：同键重放返回原操作记录与当前状态（重放
+        检查先于一切在册性校验），同键携带不同目标集或参数按原始请求比
+        较返回冲突。任一目标不合格（存在性/映射/代次/检查点形态/缺根代
+        次）整体拒绝零改动；归并只处理 DAG 包含（谱系吸收由回退回执的
+        实际失效清单补记）。
+        """
+        if self._workspace_config is None:
+            raise ValueError("traceback workspace 未开启，拒绝文件回滚")
+        client_op_id = str(args.get("client_op_id") or "")
+        if not client_op_id:
+            raise ValueError("client_op_id 不能为空")
+        raw_targets = args.get("targets")
+        if not isinstance(raw_targets, list) or not raw_targets:
+            raise ValueError("targets 须为非空列表")
+        request_targets: list[dict[str, Any]] = []
+        node_ids: list[str] = []
+        for entry in raw_targets:
+            if not isinstance(entry, dict):
+                raise ValueError("targets 项须为对象")
+            node_id = str(entry.get("node_id") or "")
+            if not node_id:
+                raise ValueError("targets 项缺少 node_id")
+            if self._dag_node(node_id) is None:
+                raise ValueError(f"节点不存在：{node_id}")
+            if node_id in node_ids:
+                raise ValueError(f"重复目标：{node_id}")
+            node_ids.append(node_id)
+            request_targets.append(
+                {
+                    "node_id": node_id,
+                    "scope_id": str(entry.get("scope_id") or ""),
+                    "checkpoint_id": str(entry.get("checkpoint_id") or ""),
+                    "expected_epoch": entry.get("expected_epoch"),
+                }
+            )
+        expected_root_epoch = args.get("expected_root_epoch")
+        if expected_root_epoch is not None:
+            if not isinstance(expected_root_epoch, int) or isinstance(expected_root_epoch, bool):
+                raise ValueError("expected_root_epoch 需为整数")
+            request_root_epoch = expected_root_epoch
+        else:
+            request_root_epoch = 0
+        # 幂等重放先于一切在册性校验：链完成后目标已换映射/代次，仍须返回原记录
+        existing = self._state.operation_by_client(client_op_id)
+        if existing is not None:
+            if existing.get("kind") != "rollback_nodes":
+                raise ValueError(f"client_op_id 冲突：{client_op_id} 已绑定其他回滚请求")
+            stored = existing.get("request") or {}
+            if self._batch_request_conflicts(stored, request_targets, request_root_epoch):
+                raise ValueError(f"client_op_id 冲突：{client_op_id} 已绑定不同参数的批量回滚请求")
+            return self._operation_view(existing)
+        # 逐目标在册性校验（任一不合格整体拒绝、零改动）
+        validated: list[dict[str, Any]] = []
+        any_passed = False
+        for entry in request_targets:
+            node_id = str(entry["node_id"])
+            mapping = self._state.node_workspace(node_id)
+            if mapping is None:
+                raise ValueError(f"目标无有效检查点（节点无在册作用域）：{node_id}")
+            scope_id = str(entry["scope_id"])
+            if scope_id and scope_id != mapping[0]:
+                raise ValueError(f"scope_id 与当前作用域不符：{mapping[0]}")
+            expected_epoch = entry["expected_epoch"]
+            if not isinstance(expected_epoch, int) or isinstance(expected_epoch, bool):
+                raise ValueError("expected_epoch 需为整数")
+            if expected_epoch != mapping[1]:
+                raise ValueError(f"expected_epoch 不匹配：当前作用域代次 {mapping[1]}")
+            checkpoint_id = str(entry["checkpoint_id"])
+            if checkpoint_id and not checkpoint_id.startswith(f"{mapping[0]}:scope_start:"):
+                raise ValueError(f"批量目标检查点须为节点作用域的 scope_start 行：{checkpoint_id}")
+            passed = self._state.status(node_id) == "passed"
+            if passed:
+                any_passed = True
+                if not checkpoint_id:
+                    checkpoint_id = f"{mapping[0]}:scope_start:e{mapping[1]}"
+            validated.append(
+                {
+                    "node_id": node_id,
+                    "scope_id": mapping[0],
+                    "scope_epoch": mapping[1],
+                    "checkpoint_id": checkpoint_id,
+                    "expected_gen": self._state.gen(node_id),
+                    "merged": passed,
+                }
+            )
+        root_epoch = request_root_epoch
+        if any_passed:
+            if root_epoch < 1:
+                raise ValueError("含已合并目标须携带合法 expected_root_epoch（整数 ≥ 1）")
+        else:
+            root_epoch = 0
+        kept_targets, merged_from = self._merge_batch_targets(validated)
+        now = datetime.now(tz=UTC).isoformat()
+        record: dict[str, Any] = {
+            "operation_id": client_op_id,
+            "client_op_id": client_op_id,
+            "kind": "rollback_nodes",
+            "targets": kept_targets,
+            "request": {
+                "targets": request_targets,
+                "expected_root_epoch": request_root_epoch,
+            },
+            "merged_from": merged_from,
+            "expected_root_epoch": root_epoch,
+            "reason": str(args.get("reason") or "") or "批量回滚",
+            "phase": _OP_PENDING,
+            "error": "",
+            "new_gen": 0,
+            "new_root_epoch": 0,
+            # 执行簿记：随驱动快照持久化，恢复后不重复落账
+            "retract_op_id": "",
+            "lineage_done": False,
+            "preallocated_gen": 0,
+            "abandon_op_ids": {},
+            "absorbed": [],
+            "slices": {},
+            "covered": [],
+            "created_at": now,
+            "updated_at": now,
+        }
+        self._state.upsert_operation(record)
+        logger.info(
+            "rollback_nodes op %s registered for %s targets (%s merged into others)",
+            client_op_id,
+            len(kept_targets),
+            len(merged_from),
+        )
+        return self._operation_view(record)
+
+    def _merge_batch_targets(
+        self, validated: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        """DAG 包含归并：后代目标并入祖先，已合并后代并入未合并祖先改判未合并。
+
+        被归并目标退出显式目标集（其重置由锚点切片覆盖、物理清理由重排
+        起步欠账清理收敛）；归并只认包含关系，reset 集相交但互不包含的
+        兄弟目标合法共存，失效集由切片并集承担。
+        """
+        unmerged = [t for t in validated if not t["merged"]]
+        merged = [t for t in validated if t["merged"]]
+        merged_from: dict[str, str] = {}
+        kept: list[dict[str, Any]] = []
+        for target in unmerged:
+            node_id = target["node_id"]
+            anchor = next(
+                (
+                    u["node_id"]
+                    for u in unmerged
+                    if u["node_id"] != node_id and node_id in self._dag.descendants(u["node_id"])
+                ),
+                None,
+            )
+            if anchor:
+                merged_from[node_id] = anchor
+            else:
+                kept.append(target)
+        for target in merged:
+            node_id = target["node_id"]
+            anchor = next(
+                (u["node_id"] for u in unmerged if node_id in self._dag.descendants(u["node_id"])),
+                None,
+            )
+            if anchor:
+                # 跨桶归并改判未合并编排语义：集成成果保留、随锚点新 attempt 重跑
+                merged_from[node_id] = anchor
+            else:
+                kept.append(target)
+        # 保持原始请求顺序（视图呈现与链内动作号下标稳定）
+        order = {t["node_id"]: idx for idx, t in enumerate(validated)}
+        kept.sort(key=lambda t: order[t["node_id"]])
+        return kept, merged_from
+
+    @staticmethod
+    def _batch_request_conflicts(
+        stored: Mapping[str, Any],
+        request_targets: list[dict[str, Any]],
+        request_root_epoch: int,
+    ) -> bool:
+        """幂等重放的参数比较：按原始请求逐字段比对，不做归并后比较。"""
+        stored_targets = stored.get("targets") or []
+        if len(stored_targets) != len(request_targets):
+            return True
+        for stored_entry, entry in zip(stored_targets, request_targets, strict=False):
+            if any(
+                stored_entry.get(key) != entry.get(key)
+                for key in ("node_id", "scope_id", "checkpoint_id", "expected_epoch")
+            ):
+                return True
+        return int(stored.get("expected_root_epoch") or 0) != request_root_epoch
+
+    @staticmethod
+    def _batch_operation_view(record: Mapping[str, Any]) -> dict[str, Any]:
+        """批量回滚操作记录的对外形状（targets 为归并后目标集）。"""
+        targets = record.get("targets") or []
+        first_target = targets[0] if targets else {}
+        return {
+            "operation_id": record["operation_id"],
+            "client_op_id": record["client_op_id"],
+            "kind": "rollback_nodes",
+            "node_id": str(first_target.get("node_id", "")),
+            "scope_id": str(first_target.get("scope_id", "")),
+            "checkpoint_id": first_target.get("checkpoint_id") or None,
+            "targets": [str(t.get("node_id")) for t in targets],
+            "merged_from": dict(record.get("merged_from") or {}),
+            "phase": record.get("phase", ""),
+            "error": record.get("error") or None,
+            "new_gen": int(record.get("new_gen", 0) or 0),
+            "new_root_epoch": int(record.get("new_root_epoch", 0) or 0),
+            "reason": record.get("reason", ""),
+            "created_at": record.get("created_at"),
+            "updated_at": record.get("updated_at"),
+        }
+
+    @staticmethod
+    def _batch_target_accounted(record: Mapping[str, Any], target: Mapping[str, Any]) -> bool:
+        """目标账已落：已合并目标看谱系失效，未合并目标看切片或回退吸收。"""
+        if target.get("merged"):
+            return bool(record.get("lineage_done"))
+        node_id = str(target.get("node_id"))
+        return node_id in (record.get("slices") or {}) or node_id in (record.get("absorbed") or [])
+
+    def _advance_batch_restore_op(self, record: dict[str, Any], actions: list[RunAction]) -> None:
+        """批量链推进：登记态全量复核后转相位并同轮发动作，重建相逐轮收口。
+
+        废弃相位不在此推进——切片随回执增量落账；崩溃恢复经登记态重发
+        （已落账目标在复核中跳过，动作号稳定命中宿主幂等面）。
+        """
+        phase = record.get("phase")
+        if phase == _OP_REBUILDING:
+            self._check_batch_rebuilding(record)
+            return
+        if phase != _OP_PENDING:
+            return
+        for target in record.get("targets") or []:
+            if self._batch_target_accounted(record, target):
+                continue
+            node_id = str(target.get("node_id"))
+            mapping = self._state.node_workspace(node_id)
+            if (
+                mapping is None
+                or mapping[0] != target.get("scope_id")
+                or mapping[1] != target.get("scope_epoch")
+            ):
+                self._fail_operation(record, "目标作用域映射已变化（重试或其他回滚先行）")
+                return
+            if self._state.gen(node_id) != target.get("expected_gen"):
+                self._fail_operation(record, "目标节点代次已变化（其他回滚先行）")
+                return
+        merged_targets = [t for t in record.get("targets") or [] if t.get("merged")]
+        if merged_targets and not record.get("lineage_done"):
+            if not record.get("retract_op_id"):
+                self._workspace_seq += 1
+                record["retract_op_id"] = f"rb-retract-{self._workspace_seq}"
+            record["phase"] = _OP_RETRACTING
+            record["updated_at"] = datetime.now(tz=UTC).isoformat()
+            self._state.upsert_operation(record)
+            actions.append(
+                RetractIntegrationLine(
+                    targets=tuple(
+                        RetractTarget(
+                            scope_id=str(t["scope_id"]),
+                            checkpoint_id=str(t.get("checkpoint_id") or ""),
+                        )
+                        for t in merged_targets
+                    ),
+                    expected_root_epoch=int(record.get("expected_root_epoch") or 0),
+                    client_op_id=record["retract_op_id"],
+                    context=f"batch={record['operation_id']}",
+                )
+            )
+            return
+        record["phase"] = _OP_ABANDONING
+        record["updated_at"] = datetime.now(tz=UTC).isoformat()
+        self._state.upsert_operation(record)
+        # 同轮直落废弃相位：无已合并桶时废弃动作即刻逐目标发出
+        self._advance_batch_abandoning(record, actions)
+
+    def _advance_batch_abandoning(self, record: dict[str, Any], actions: list[RunAction]) -> None:
+        """废弃相位：未落账目标逐个发废弃动作（同轮发出、动作号稳定可对账）。"""
+        targets = record.get("targets") or []
+        slices = record.get("slices") or {}
+        absorbed = record.get("absorbed") or []
+        pending_targets = [
+            t
+            for t in targets
+            if not t.get("merged")
+            and str(t.get("node_id")) not in slices
+            and str(t.get("node_id")) not in absorbed
+        ]
+        op_ids = record.get("abandon_op_ids") or {}
+        if pending_targets and not op_ids:
+            self._workspace_seq += 1
+            seq = self._workspace_seq
+            for idx, target in enumerate(targets):
+                if target.get("merged"):
+                    continue
+                node_id = str(target.get("node_id"))
+                op_ids[node_id] = f"rb-abandon-{seq}-{idx}"
+            record["abandon_op_ids"] = op_ids
+            record["updated_at"] = datetime.now(tz=UTC).isoformat()
+            self._state.upsert_operation(record)
+        for target in pending_targets:
+            node_id = str(target.get("node_id"))
+            actions.append(
+                AbandonScope(
+                    scope_id=str(target["scope_id"]),
+                    expected_scope_epoch=int(target["scope_epoch"]),
+                    client_op_id=op_ids[node_id],
+                    context=f"batch={record['operation_id']}/{node_id}",
+                )
+            )
+        if not pending_targets:
+            self._finish_batch_accounting(record, actions)
+
+    def _finish_batch_accounting(self, record: dict[str, Any], actions: list[RunAction]) -> None:
+        """全部显式目标账已落：发纯确认并进重建相（操作终态不再发新动作）。"""
+        if record.get("phase") in (_OP_FAILED, _OP_SUCCEEDED, _OP_REBUILDING):
+            return
+        targets = record.get("targets") or []
+        slices = record.get("slices") or {}
+        absorbed = record.get("absorbed") or []
+        if not all(
+            (t.get("merged") and record.get("lineage_done"))
+            or str(t.get("node_id")) in slices
+            or str(t.get("node_id")) in absorbed
+            for t in targets
+        ):
+            return
+        first_scope = str((targets[0] or {}).get("scope_id") or "") if targets else ""
+        actions.append(
+            RestoreCommitted(
+                scope_id=first_scope,
+                client_op_id=str(record["operation_id"]),
+                context=f"batch={record['operation_id']}",
+            )
+        )
+        record["phase"] = _OP_REBUILDING
+        record["updated_at"] = datetime.now(tz=UTC).isoformat()
+        self._state.upsert_operation(record)
+
+    def _check_batch_rebuilding(self, record: dict[str, Any]) -> None:
+        """重建收口：全部显式目标新工作区就绪或编排终态化（skipped/failed）。"""
+        nodes = self._state.snapshot()["nodes"]
+        for target in record.get("targets") or []:
+            node_id = str(target.get("node_id"))
+            info = nodes.get(node_id)
+            if info is None:
+                continue  # 已随子图废弃（generator 重新生成），编排归属另有承接
+            if self._state.node_workspace(node_id) is None and info.get("status") not in (
+                "skipped",
+                "failed",
+            ):
+                return
+        record["phase"] = _OP_SUCCEEDED
+        record["updated_at"] = datetime.now(tz=UTC).isoformat()
+        self._state.upsert_operation(record)
+        logger.info(
+            "rollback_nodes op %s completed at gen %s",
+            record["operation_id"],
+            record.get("new_gen"),
+        )
+
+    def _fall_batch_slice(
+        self,
+        record: dict[str, Any],
+        plan: scheduler.BatchSlicePlan,
+        actions: list[RunAction],
+        *,
+        clear_mapping_nodes: set[str],
+    ) -> None:
+        """落一张批量切片：停在途会话、归档重置、清工作区映射、同步图状态。"""
+        snapshot = self._state.snapshot()
+        stop_sids = [
+            sid
+            for nid in plan.stop_nodes
+            if (sid := snapshot["nodes"].get(nid, {}).get("workflow_controller_session_id"))
+        ]
+        if stop_sids:
+            actions.append(AwaitSessions(ids=tuple(stop_sids), timeout_s=0))
+        scheduler.apply_batch_slice(self._state, self._dag, plan)
+        for nid in plan.reset_nodes:
+            reset_act = self._nodes.pop(nid, None)
+            if reset_act is not None:
+                self._cancel_timer(reset_act, actions)
+            self._last_verify_reason.pop(nid, None)
+        for nid in clear_mapping_nodes:
+            self._state.clear_node_workspace(nid)
+        record["covered"] = sorted(set(record.get("covered") or []) | plan.reset_nodes)
+        self._set_graph_status(
+            actions,
+            scheduler.derive_status_after_rollback(self._state.snapshot()),
+        )
+
+    def _apply_batch_retract_note(
+        self, note: IntegrationLineRetracted, actions: list[RunAction]
+    ) -> bool:
+        """批量链回退回执：当场落谱系失效计划（先于本轮调度），随后进废弃相位。
+
+        失效节点取回执 invalidated 作用域映射的节点；被连带失效的显式未
+        合并目标补记归并不再发废弃动作；计划过期（目标代次被他者推进）
+        时仍按实际失效清单以新鲜代落一次收口失效后置败——物理后果必须
+        反映到编排。
+        """
+        context = note.context or ""
+        if not context.startswith(self._BATCH_CTX_PREFIX):
+            return False
+        operation_id = context.removeprefix(self._BATCH_CTX_PREFIX)
+        record = self._state.operation(operation_id)
+        if record is None or record.get("kind") != "rollback_nodes":
+            return False
+        if record.get("lineage_done"):
+            return True  # 已落账（崩溃恢复幂等重放回执）：不重复落
+        targets = record.get("targets") or []
+        merged_targets = [t for t in targets if t.get("merged")]
+        if note.new_root_epoch != int(record.get("expected_root_epoch") or 0) + 1:
+            self._fail_operation(record, f"集成线回退回执根代次异常：{note.new_root_epoch}")
+            return True
+        invalidated_scopes = {scope_id for scope_id, _epoch in note.invalidated}
+        invalidated_nodes = {
+            node_id
+            for node_id, info in self._state.snapshot()["nodes"].items()
+            if (mapping := self._state.node_workspace(node_id)) and mapping[0] in invalidated_scopes
+        }
+        if any(str(t.get("node_id")) not in invalidated_nodes for t in merged_targets):
+            self._fail_operation(record, "回退回执的失效集不含全部已合并目标（谱系对不上账）")
+            return True
+        # 回执实际失效清单中被连带失效的显式未合并目标补记归并（不发废弃动作）
+        absorbed = list(record.get("absorbed") or [])
+        merged_from = dict(record.get("merged_from") or {})
+        for target in targets:
+            node_id = str(target.get("node_id"))
+            if target.get("merged") or node_id in absorbed:
+                continue
+            if node_id in invalidated_nodes:
+                absorbed.append(node_id)
+                merged_from[node_id] = "集成线回退"
+        record["absorbed"] = absorbed
+        record["merged_from"] = merged_from
+        # 预分配共享新回滚代（后续切片复用，单调性核验在切片落账前）
+        preallocated = self._state.max_gen() + 1
+        record["preallocated_gen"] = preallocated
+        record["new_gen"] = preallocated
+        # 记账目标 = 已合并目标 + 被连带失效的显式未合并目标（回滚边与预算按各显式目标分别记）
+        ledger_targets = [
+            (str(t["node_id"]), int(t.get("expected_gen") or 0))
+            for t in targets
+            if t.get("merged") or str(t.get("node_id")) in absorbed
+        ]
+        plan = scheduler.plan_batch_lineage(
+            self._state,
+            ledger_targets,
+            invalidated_nodes,
+            preallocated,
+        )
+        if plan is None:
+            fresh = self._state.max_gen() + 1
+            cleanup = scheduler.plan_batch_lineage_cleanup(
+                self._state,
+                [node_id for node_id, _gen in ledger_targets],
+                invalidated_nodes,
+                fresh,
+            )
+            self._fall_batch_slice(
+                record, cleanup, actions, clear_mapping_nodes=set(cleanup.reset_nodes)
+            )
+            self._fail_operation(record, "回滚计划陈旧：目标代次已变化")
+            return True
+        self._fall_batch_slice(record, plan, actions, clear_mapping_nodes=set(plan.reset_nodes))
+        invalidated_scope_list = [scope for scope, _epoch in note.invalidated]
+        for node_id, _expected_gen in ledger_targets:
+            self._emit_graph_event(
+                actions,
+                "node_rollback",
+                node_id=node_id,
+                rollback_to=node_id,
+                reason=record.get("reason") or "批量回滚",
+                invalidated=invalidated_scope_list,
+                preserved=list(note.preserved),
+                new_root_epoch=note.new_root_epoch,
+                new_gen=preallocated,
+            )
+        self._emit_graph_event(
+            actions,
+            "nodes_rollback",
+            targets=[str(t.get("node_id")) for t in targets],
+            merged_from=merged_from,
+            invalidated=invalidated_scope_list,
+            preserved=list(note.preserved),
+            new_root_epoch=note.new_root_epoch,
+            new_gen=preallocated,
+            reason=record.get("reason") or "批量回滚",
+        )
+        record["lineage_done"] = True
+        record["new_root_epoch"] = note.new_root_epoch
+        if record.get("phase") not in (_OP_FAILED, _OP_SUCCEEDED):
+            record["phase"] = _OP_ABANDONING
+        record["updated_at"] = datetime.now(tz=UTC).isoformat()
+        self._state.upsert_operation(record)
+        if record.get("phase") == _OP_ABANDONING:
+            # 同轮进废弃相位：未被回退吸收的未合并目标立即发废弃动作；
+            # 全部被吸收或无未合并目标时由该入口收口进重建相
+            self._advance_batch_abandoning(record, actions)
+        return True
+
+    def _apply_batch_abandoned_note(self, note: ScopeAbandoned, actions: list[RunAction]) -> bool:
+        """批量链废弃回执：回执即落账——每张回执当场落该目标的计划切片。
+
+        切片 reset 集为该目标通则 reset 集扣除已落账节点，共用预分配代
+        （无已合并桶时首张切片新鲜分配并记档）；落账前做代次单调性核
+        验：目标已被他者推进的切片跳过记档，其余情形以新鲜代落账并标
+        注。回执不按操作相位过滤——操作终态只门控新动作与重建判定。
+        """
+        context = note.context or ""
+        if not context.startswith(self._BATCH_CTX_PREFIX):
+            return False
+        operation_id, _, node_id = context.removeprefix(self._BATCH_CTX_PREFIX).partition("/")
+        record = self._state.operation(operation_id)
+        if record is None or record.get("kind") != "rollback_nodes":
+            return False
+        target = next(
+            (t for t in record.get("targets") or [] if str(t.get("node_id")) == node_id), None
+        )
+        if target is None or target.get("merged"):
+            return True  # 与链内目标对不上账：消费掉防误伤其他链
+        slices = record.setdefault("slices", {})
+        if node_id in slices or node_id in (record.get("absorbed") or []):
+            return True  # 已落账或已被回退覆盖（幂等重放回执）
+        if note.new_scope_epoch != int(target.get("scope_epoch") or 0) + 1:
+            self._fail_operation(record, f"废弃回执代次异常：{note.new_scope_epoch}")
+            return True
+        candidate = int(record.get("preallocated_gen") or 0)
+        if candidate <= 0:
+            candidate = self._state.max_gen() + 1
+            record["preallocated_gen"] = candidate
+            record["new_gen"] = candidate
+        covered = set(record.get("covered") or [])
+        plan = scheduler.plan_batch_slice(
+            self._state,
+            self._dag,
+            node_id,
+            int(target.get("expected_gen") or 0),
+            covered,
+            candidate,
+        )
+        if plan is None:
+            slices[node_id] = {
+                "status": "skipped",
+                "gen": 0,
+                "detail": "目标代次已偏离（他者回滚先行）",
+            }
+            record["updated_at"] = datetime.now(tz=UTC).isoformat()
+            self._state.upsert_operation(record)
+            self._finish_batch_accounting(record, actions)
+            return True
+        if any(self._state.gen(nid) >= candidate for nid in plan.reset_nodes):
+            # 切片集内代次不低于预分配代：改用新鲜代（代次单调优先于共用同代）
+            fresh = self._state.max_gen() + 1
+            plan = scheduler.plan_batch_slice(
+                self._state,
+                self._dag,
+                node_id,
+                int(target.get("expected_gen") or 0),
+                covered,
+                fresh,
+            )
+            slices[node_id] = {"status": "fresh", "gen": fresh}
+        else:
+            slices[node_id] = {"status": "shared", "gen": candidate}
+        self._fall_batch_slice(record, plan, actions, clear_mapping_nodes={node_id})
+        slices[node_id]["gen"] = plan.new_gen
+        self._emit_graph_event(
+            actions,
+            "node_rollback",
+            node_id=node_id,
+            rollback_to=node_id,
+            reason=record.get("reason") or "批量回滚",
+            new_gen=plan.new_gen,
+        )
+        record["updated_at"] = datetime.now(tz=UTC).isoformat()
+        self._state.upsert_operation(record)
+        self._finish_batch_accounting(record, actions)
+        return True
+
     def _fail_restore_op_on_action_failure(self, note: WorkspaceActionFailed) -> None:
         """回滚链上的动作失败置操作失败：按链内动作号/节点精确对账。"""
         node_id = ""
@@ -2931,13 +3541,42 @@ class GraphDriver:
         for record in self._state.operations().values():
             phase = record.get("phase")
             if (
+                record.get("kind") == "rollback_nodes"
+                and note.action == "AbandonScope"
+                and phase not in (_OP_FAILED, _OP_SUCCEEDED)
+                and note.client_op_id in (record.get("abandon_op_ids") or {}).values()
+            ):
+                target_node = next(
+                    nid
+                    for nid, op_id in (record.get("abandon_op_ids") or {}).items()
+                    if op_id == note.client_op_id
+                )
+                self._fail_operation(record, f"废弃动作失败（{target_node}）: {note.error}")
+            elif (
+                record.get("kind") == "rollback_nodes"
+                and phase == _OP_RETRACTING
+                and note.action == "RetractIntegrationLine"
+                and note.client_op_id == record.get("retract_op_id")
+            ):
+                self._fail_operation(record, f"集成线回退失败: {note.error}")
+            elif (
+                record.get("kind") == "rollback_nodes"
+                and phase == _OP_REBUILDING
+                and note.action == "PrepareScopeWorkspace"
+                and node_id
+                and node_id in (str(t.get("node_id")) for t in record.get("targets") or [])
+            ):
+                self._fail_operation(record, f"重建工作区失败: {note.error}")
+            elif (
                 phase == _OP_ABANDONING
+                and record.get("kind") == "rollback_node"
                 and note.action == "AbandonScope"
                 and note.client_op_id == record.get("abandon_op_id")
             ):
                 self._fail_operation(record, f"废弃动作失败: {note.error}")
             elif (
                 phase == _OP_REBUILDING
+                and record.get("kind") != "rollback_nodes"
                 and note.action == "PrepareScopeWorkspace"
                 and record.get("node_id") == node_id
             ):
@@ -2949,7 +3588,8 @@ class GraphDriver:
             ):
                 self._fail_operation(record, f"组检查点恢复失败: {note.error}")
             elif (
-                phase == _OP_RETRACTING
+                record.get("kind") == "rollback_integrated"
+                and phase == _OP_RETRACTING
                 and note.action == "RetractIntegrationLine"
                 and note.client_op_id == record.get("retract_op_id")
             ):

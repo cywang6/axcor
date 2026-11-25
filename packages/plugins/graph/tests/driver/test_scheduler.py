@@ -386,6 +386,85 @@ class TestPlanRestore:
         assert snap["rollback_edges"] == [{"from": "gen", "from_gen": 0, "to": "gen", "to_gen": 1}]
 
 
+class TestBatchSlicePlan:
+    @staticmethod
+    def _scene() -> tuple[DAG, GraphState]:
+        """A 已过、B/C 为下游的批量回滚现场。"""
+        dag = _dag(
+            [
+                {"id": "A"},
+                {"id": "B", "depends_on": ["A"]},
+                {"id": "C", "depends_on": ["B"]},
+            ]
+        )
+        st = _state({"A", "B", "C"})
+        st.set_node_status("A", "passed")
+        return dag, st
+
+    def test_slice_reset_set_deducts_covered_nodes(self):
+        # 切片 reset 集扣除已落账节点：兄弟切片共享下游时不重复归档重置
+        dag, st = self._scene()
+        plan = scheduler.plan_batch_slice(st, dag, "B", st.gen("B"), {"C"}, 5)
+        assert plan is not None
+        assert plan.reset_nodes == {"B"}
+        assert plan.new_gen == 5
+
+    def test_slice_stale_gen_returns_none(self):
+        dag, st = self._scene()
+        assert scheduler.plan_batch_slice(st, dag, "B", st.gen("B") + 1, set(), 5) is None
+
+    def test_slice_ledger_edges_and_budget_on_target(self):
+        dag, st = self._scene()
+        plan = scheduler.plan_batch_slice(st, dag, "B", st.gen("B"), set(), 5)
+        scheduler.apply_batch_slice(st, dag, plan)
+        snap = st.snapshot()
+        assert snap["rollback_edges"] == [{"from": "B", "from_gen": 0, "to": "B", "to_gen": 5}]
+        assert st.rollback_left("B", "B", 1) == 0
+        assert st.gen("B") == 5 and st.gen("C") == 5
+        assert "B#0" in snap["retired_instances"] and "C#0" in snap["retired_instances"]
+
+    def test_lineage_takes_invalidated_union_not_dag_closure(self):
+        # 谱系失效计划：reset 集取失效清单（非 DAG 后代闭包），保留者不重跑
+        st = _state({"A", "B", "D"})
+        st.set_node_status("A", "passed")
+        st.set_node_status("B", "passed")
+        plan = scheduler.plan_batch_lineage(st, [("A", 0)], {"A", "D"}, 7)
+        assert plan is not None
+        assert plan.reset_nodes == {"A", "D"}
+        assert plan.target_edges == [("A", 0)]
+
+    def test_lineage_stale_target_returns_none(self):
+        _dag, st = self._scene()
+        st.reset_rollback("B", 3)  # 他者回滚先推进目标代次
+        assert scheduler.plan_batch_lineage(st, [("B", 0)], {"B"}, 8) is None
+
+    def test_lineage_cleanup_ignores_gen_validation(self):
+        # 收口计划不做代次核验：显式目标并入失效集，即便代次已被推进
+        _dag, st = self._scene()
+        st.reset_rollback("B", 3)
+        plan = scheduler.plan_batch_lineage_cleanup(st, ["B"], {"C"}, 9)
+        assert plan is not None
+        assert plan.reset_nodes == {"B", "C"}
+        assert plan.target_edges == [("B", 3)]
+
+    def test_subgraph_target_slice_adds_parent_gen_once(self):
+        # 子图目标切片：父 generator 入 reset 集并置回 passed、其子图不废弃、
+        # generator 一条回滚边 + 目标自身一条回滚边
+        dag, st = _gen_subgraph_failed()
+        plan = scheduler.plan_batch_slice(st, dag, "gen:s1", st.gen("gen:s1"), set(), 4)
+        assert plan is not None
+        assert plan.parent_gens == {"gen": 0}
+        assert plan.reset_nodes == {"gen", "gen:s1"}
+        assert plan.discard_subgraphs == {}
+        scheduler.apply_batch_slice(st, dag, plan)
+        assert st.status("gen") == "passed"
+        snap = st.snapshot()
+        assert {tuple(e.values()) for e in snap["rollback_edges"]} == {
+            ("gen", 0, "gen", 4),
+            ("gen:s1", 0, "gen:s1", 4),
+        }
+
+
 class TestSubgraphRestore:
     @staticmethod
     def test_restored_plan_id_mismatch_rejected():

@@ -439,6 +439,64 @@ class RunAPI:
         except RunNotFoundError as e:
             raise RunApiNotFoundError(e.args[0] if e.args else run_id) from e
 
+    async def request_run_rollback_nodes(
+        self,
+        run_id: str,
+        *,
+        targets: list[dict[str, Any]],
+        client_op_id: str,
+        expected_root_epoch: int | None = None,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        """批量节点回滚请求（异步）：转发驱动 rollback_nodes op，返回 operation_id。
+
+        targets 每项携带 node_id 与 expected_epoch（可选 scope_id 与
+        checkpoint_id）；每个显式给出的 checkpoint_id 先对 run 的检查点
+        账本核验存在（无有效检查点明确拒绝）；其余前置（traceback 开关、
+        映射/代次、目标归并）由驱动在受理时校验。含已合并目标时须另携
+        带旧根代次 expected_root_epoch。
+        """
+        if not isinstance(targets, list) or not targets:
+            raise ValueError("targets 须为非空列表")
+        explicit_checkpoints: list[str] = []
+        for entry in targets:
+            if not isinstance(entry, dict) or not entry.get("node_id"):
+                raise ValueError("targets 每项须为携带 node_id 的对象")
+            if entry.get("checkpoint_id"):
+                explicit_checkpoints.append(str(entry["checkpoint_id"]))
+        if explicit_checkpoints:
+            rows = await self.list_run_checkpoints(run_id)
+            known = {row["checkpoint_id"] for row in rows}
+            missing = [cp for cp in explicit_checkpoints if cp not in known]
+            if missing:
+                raise ValueError(f"检查点不存在于该 run：{', '.join(missing)}")
+        args: dict[str, Any] = {
+            "targets": [
+                {
+                    "node_id": entry["node_id"],
+                    "expected_epoch": entry.get("expected_epoch"),
+                    **(
+                        {"scope_id": entry["scope_id"]} if entry.get("scope_id") is not None else {}
+                    ),
+                    **(
+                        {"checkpoint_id": entry["checkpoint_id"]}
+                        if entry.get("checkpoint_id") is not None
+                        else {}
+                    ),
+                }
+                for entry in targets
+            ],
+            "client_op_id": client_op_id,
+        }
+        if expected_root_epoch is not None:
+            args["expected_root_epoch"] = expected_root_epoch
+        if reason:
+            args["reason"] = reason
+        try:
+            return await self._coord.request_driver_op(run_id, "rollback_nodes", args)
+        except RunNotFoundError as e:
+            raise RunApiNotFoundError(e.args[0] if e.args else run_id) from e
+
     async def request_subagent_rollback(
         self,
         run_id: str,

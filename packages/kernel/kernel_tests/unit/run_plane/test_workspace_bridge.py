@@ -867,6 +867,53 @@ async def test_run_api_rollback_op_channel_and_operation_lookup(tmp_path: Path) 
         await api.get_run_operation(run_id, "co-9")
 
 
+async def test_run_api_batch_rollback_op_channel(tmp_path: Path) -> None:
+    """request_run_rollback_nodes 经驱动 op 转发；显式检查点先对账核验。"""
+    from workflow_controller.api.run_api import RunAPI
+
+    work_root = tmp_path / "root"
+    work_root.mkdir()
+
+    def plan(driver: ProbeDriver) -> list[RunAction] | None:
+        return []  # 保持运行供 op 通道用例
+
+    probe = OpProbeDriver(plan)
+    h = BridgeHarness(tmp_path, plan, driver=probe)
+    run_id = await h.start()
+    api = RunAPI(h.coord)
+
+    result = await api.request_run_rollback_nodes(
+        run_id,
+        targets=[
+            {"node_id": "a", "expected_epoch": 1},
+            {"node_id": "b", "expected_epoch": 2, "scope_id": "b-w1"},
+        ],
+        client_op_id="co-11",
+        expected_root_epoch=2,
+        reason="批量回滚",
+    )
+    assert result == {"operation_id": "co-11", "phase": "pending"}
+    assert probe.ops[0][0] == "rollback_nodes"
+    forwarded = probe.ops[0][1]["targets"]
+    assert [t["node_id"] for t in forwarded] == ["a", "b"]
+    assert forwarded[1]["expected_epoch"] == 2
+    assert forwarded[1]["scope_id"] == "b-w1"
+    assert probe.ops[0][1]["expected_root_epoch"] == 2
+
+    # 显式给出的检查点不在 run 账上：明确拒绝
+    with pytest.raises(ValueError, match="检查点不存在"):
+        await api.request_run_rollback_nodes(
+            run_id,
+            targets=[{"node_id": "a", "expected_epoch": 1, "checkpoint_id": "nope"}],
+            client_op_id="co-12",
+        )
+    # 空目标集：明确拒绝
+    with pytest.raises(ValueError, match="targets"):
+        await api.request_run_rollback_nodes(run_id, targets=[], client_op_id="co-13")
+
+    await h.coord.stop_run(run_id)
+
+
 def _retraction_plan(
     work_root: Path,
     *,

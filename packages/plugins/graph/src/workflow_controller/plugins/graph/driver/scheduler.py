@@ -293,6 +293,136 @@ def plan_integrated_restore(
     )
 
 
+@dataclass
+class BatchSlicePlan:
+    """批量回滚单张落账切片：reset 集与显式目标的记账边。"""
+
+    new_gen: int
+    reset_nodes: set[str]
+    stop_nodes: set[str]
+    discard_subgraphs: dict[str, list[str]]
+    # 父 generator 归属：generator → 落账前代次（编排后置回 passed 并记一条回滚边）
+    parent_gens: dict[str, int]
+    # 显式目标及其落账前代次（各记自身回滚边与预算）
+    target_edges: list[tuple[str, int]]
+
+
+def _batch_slice_plan(
+    state: GraphState,
+    new_gen: int,
+    reset_nodes: set[str],
+    parent_gens: dict[str, int],
+    target_edges: list[tuple[str, int]],
+) -> BatchSlicePlan:
+    """切片公共组装：停集与废弃子图清单由 reset 集统一推导。"""
+    nodes = state.snapshot()["nodes"]
+    stop_nodes = {
+        nid for nid in reset_nodes if (nodes.get(nid, {}) or {}).get("status") == "running"
+    }
+    discard_subgraphs = {
+        nid: old_ids
+        for nid in reset_nodes
+        if nid not in parent_gens and (old_ids := state.subgraph_node_ids(nid))
+    }
+    return BatchSlicePlan(
+        new_gen=new_gen,
+        reset_nodes=reset_nodes,
+        stop_nodes=stop_nodes,
+        discard_subgraphs=discard_subgraphs,
+        parent_gens=parent_gens,
+        target_edges=target_edges,
+    )
+
+
+def plan_batch_slice(
+    state: GraphState,
+    dag: DAG,
+    target: str,
+    expected_gen: int,
+    covered_nodes: set[str],
+    new_gen: int,
+) -> BatchSlicePlan | None:
+    """批量链单目标切片计划：通则 reset 集扣除已落账节点、共用给定价。
+
+    目标代次已偏离（他者回滚先行）或节点已被子图废弃移除时返回 None，
+    切片跳过落账由调用方记档。
+    """
+    nodes = state.snapshot()["nodes"]
+    if target not in nodes or state.gen(target) != expected_gen:
+        return None
+    reset_nodes = (dag.descendants(target) | {target}) - covered_nodes
+    reset_nodes &= set(nodes)
+    parent_gens: dict[str, int] = {}
+    parent_gen_node = state.subgraph_parent(target)
+    if parent_gen_node and parent_gen_node in nodes and parent_gen_node not in covered_nodes:
+        parent_gens[parent_gen_node] = state.gen(parent_gen_node)
+        reset_nodes.add(parent_gen_node)
+    return _batch_slice_plan(state, new_gen, reset_nodes, parent_gens, [(target, expected_gen)])
+
+
+def plan_batch_lineage(
+    state: GraphState,
+    merged_targets: list[tuple[str, int]],
+    invalidated_nodes: set[str],
+    new_gen: int,
+) -> BatchSlicePlan | None:
+    """回退回执的谱系失效计划：reset 集取失效清单并集（非 DAG 后代闭包）。
+
+    任一已合并目标代次已偏离（他者回滚先行）返回 None，调用方按回执
+    实际失效清单以新鲜代收口。
+    """
+    nodes = state.snapshot()["nodes"]
+    reset_nodes = set(invalidated_nodes) & set(nodes)
+    target_edges: list[tuple[str, int]] = []
+    parent_gens: dict[str, int] = {}
+    for node_id, expected_gen in merged_targets:
+        if node_id not in nodes or state.gen(node_id) != expected_gen:
+            return None
+        reset_nodes.add(node_id)
+        target_edges.append((node_id, state.gen(node_id)))
+        parent_gen_node = state.subgraph_parent(node_id)
+        if parent_gen_node and parent_gen_node in nodes:
+            parent_gens[parent_gen_node] = state.gen(parent_gen_node)
+            reset_nodes.add(parent_gen_node)
+    return _batch_slice_plan(state, new_gen, reset_nodes, parent_gens, target_edges)
+
+
+def plan_batch_lineage_cleanup(
+    state: GraphState,
+    explicit_targets: list[str],
+    invalidated_nodes: set[str],
+    new_gen: int,
+) -> BatchSlicePlan:
+    """过期谱系失效的收口计划：不做代次核验，显式目标并入失效集。"""
+    nodes = state.snapshot()["nodes"]
+    reset_nodes = (set(invalidated_nodes) | set(explicit_targets)) & set(nodes)
+    parent_gens: dict[str, int] = {}
+    for node_id in explicit_targets:
+        parent_gen_node = state.subgraph_parent(node_id) if node_id in nodes else None
+        if parent_gen_node and parent_gen_node in nodes:
+            parent_gens[parent_gen_node] = state.gen(parent_gen_node)
+            reset_nodes.add(parent_gen_node)
+    target_edges = [(nid, state.gen(nid)) for nid in explicit_targets if nid in nodes]
+    return _batch_slice_plan(state, new_gen, reset_nodes, parent_gens, target_edges)
+
+
+def apply_batch_slice(state: GraphState, dag: DAG, plan: BatchSlicePlan) -> None:
+    """切片落账：归档重置、废弃旧子图、父 generator 置回、逐目标回滚边与预算。"""
+    for nid in plan.reset_nodes:
+        state.reset_rollback(nid, plan.new_gen)
+    for nid, old_ids in plan.discard_subgraphs.items():
+        dag.remove_nodes(old_ids, parent_node_id=nid)
+        state.remove_nodes(old_ids)
+        state.set_subgraph_node_ids(nid, [])
+        state.set_subgraph_nodes(nid, [])
+    for gen_node, old_gen in plan.parent_gens.items():
+        state.set_node_status(gen_node, "passed")
+        state.add_rollback_edge(gen_node, old_gen, gen_node, plan.new_gen)
+    for node, old_gen in plan.target_edges:
+        state.add_rollback_edge(node, old_gen, node, plan.new_gen)
+        state.increment_rollback(node, node)
+
+
 def apply_rollback(state: GraphState, dag: DAG, plan: RollbackPlan) -> None:
     """按计划落账：归档重置、废弃旧子图、记回滚边与预算。"""
     for nid in plan.reset_nodes:
