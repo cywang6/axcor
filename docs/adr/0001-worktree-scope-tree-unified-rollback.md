@@ -4,7 +4,7 @@ title: "ADR-0001：采用 git worktree 写者作用域树实现工作区隔离�
 status: Accepted
 owner: "chenyangwang"
 created: 2026-11-23
-updated: 2026-11-24
+updated: 2026-11-25
 related_specs:
   - docs/specs/traceback-workspace-rollback.md
   - docs/specs/rsi-online-repair-loop.md
@@ -56,6 +56,19 @@ Accepted（2026-11-23）。协议于 2026-11-24 冻结（S0a 三轮评审落档�
 | D7 无屏障 runtime 的落地路线 | **双轨并行**：claude SDK 路径先行 + opencode 上 writer 子代理 fail-closed（拒绝启动）；同时推动上游 pre-spawn hook，并评估宿主接管 task 工具 |
 | D8 隔离强度定位 | **协作式 + 审计**：防误操作与可归因为主（信任自派 agent），`file_provenance` 审计跨边界写；OS 级硬隔离（只读挂载/沙箱）为后续可选强化，不在第一版 |
 | D9 冲突检测默认档 | **git_merge（可合并性为准）**：同一文件被双方修改但三方合并干净即放行；`strict` 档保留「路径集重叠即违规」的硬保证，供需要「并发单元不得改同一文件」强约束的场景显式开启 |
+
+### 补充决策（2026-11-25）：批量节点回滚
+
+一次回滚请求携带多个节点目标（如同时回滚 A、B、C）。协议全文见 [traceback 规格 §9.4](../specs/traceback-workspace-rollback.md)，本表只记录决策本身：
+
+| 决策 | 选择 |
+|---|---|
+| D10 批量覆盖范围 | **未合并 + 已合并混合支持**：单请求两类目标共存，已合并目标先做集成线回退再统一废弃重建；子代理级目标不在批量范围（混入即拒绝） |
+| D11 批量原子性 | **全有或全无**：受理面全量校验、任一目标不合格整体拒绝零改动；执行期逻辑失败塌缩到最大一致前缀（已落账的失效计划不回撤、未处理目标保持原状、操作置 failed 留因），不留「物理先进、编排滞后」的半个现场 |
+| D12 目标重叠 | **自动归并到祖先**：DAG 包含（回滚祖先隐含重置后代）与谱系包含（目标基线谱系含另一目标的集成提交即随动失效）两层归并，归并结果入操作记录可审计；跨桶归并时**未合并祖先的编排语义优先**——被归并的已合并后代不做集成线回退（其集成成果保留在集成线、随祖先新 attempt 基线重跑），即 batch(u, v) ≡ rollback(u) 而非 rollback(u) + rollback_integrated(v)，与单目标回滚祖先的既有语义一致 |
+| D13 操作粒度 | **单 operation 整体追踪**：一个 `client_op_id` 一条操作记录，相位整体推进，轮询面与单目标链一致 |
+
+既有单目标链（`rollback_node`/`rollback_integrated`）语义与消费面不变；批量为新 op，单目标批量请求与对应单目标链语义等价。
 
 ## 被否决的方案
 
