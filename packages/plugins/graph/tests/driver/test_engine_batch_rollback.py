@@ -830,7 +830,8 @@ def test_recovery_demotes_phases_and_resends_stable_action_ids(tmp_path: Path) -
 
 
 def test_rebuilding_terminal_state_completes_without_workspace(tmp_path: Path) -> None:
-    """终态化收口：目标被编排终态化（skipped/failed）而无新工作区时操作不悬挂。"""
+    """终态化收口：目标被编排终态化（skipped/failed）而无新工作区时操作不悬挂，
+    终态化目标记入操作记录（与工作区就绪路径可区分）。"""
     driver = _independent_running_driver(
         tmp_path, ("c",), extra_nodes=[_bash_node("down", depends_on=["c"])]
     )
@@ -850,7 +851,9 @@ def test_rebuilding_terminal_state_completes_without_workspace(tmp_path: Path) -
     # 目标被失败传播置 skipped（无新工作区）：按终态收口
     driver.state.set_node_status("c", "skipped")
     decide(driver)
-    assert _op_phase(driver) == "succeeded"
+    op = _op_view(driver)
+    assert op["phase"] == "succeeded"
+    assert op["terminal_finalized"] == {"c": "skipped"}
 
 
 def test_retract_action_failure_fails_operation_zero_change(tmp_path: Path) -> None:

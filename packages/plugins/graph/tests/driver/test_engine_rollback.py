@@ -250,6 +250,40 @@ def test_prepare_failure_fails_rebuilding_operation(tmp_path: Path) -> None:
     assert "重建工作区失败" in (op["error"] or "")
 
 
+def test_rebuilding_terminal_state_completes_unmerged_chain(tmp_path: Path) -> None:
+    """终态化收口（对齐批量链边界）：目标被失败传播置 skipped 且无新工作区时
+    操作按终态收口记入操作记录，不悬挂。"""
+    driver = _started_driver(tmp_path)
+    driver.handle_op("rollback_node", _op_args())
+    decide(driver)
+    decide(
+        driver,
+        (ScopeAbandoned(scope_id="a-w1", new_scope_epoch=2, context="node=a"),),  # type: ignore[arg-type]
+    )
+    assert _op_phase(driver) == "rebuilding"
+    # 失效计划落账后目标被失败传播置 skipped（无新工作区）
+    driver.state.set_node_status("a", "skipped")
+    decide(driver)
+    op = driver.handle_op("get_operation", {"operation_id": "co-1"})
+    assert op["phase"] == "succeeded"
+    assert op["terminal_finalized"] == {"a": "skipped"}
+
+
+def test_rebuilding_workspace_ready_leaves_finalize_record_empty(tmp_path: Path) -> None:
+    """工作区就绪收口：终态化记录为空，两种完成路径可区分。"""
+    driver = _started_driver(tmp_path)
+    driver.handle_op("rollback_node", _op_args())
+    decide(driver)
+    decide(
+        driver,
+        (ScopeAbandoned(scope_id="a-w1", new_scope_epoch=2, context="node=a"),),  # type: ignore[arg-type]
+    )
+    decide(driver, (_prepared("node=a", "a-w3", path="/tmp/ws2"),))  # type: ignore[arg-type]
+    op = driver.handle_op("get_operation", {"operation_id": "co-1"})
+    assert op["phase"] == "succeeded"
+    assert op["terminal_finalized"] == {}
+
+
 def test_recovery_demotes_abandoning_phase(tmp_path: Path) -> None:
     """恢复时在途废弃相位退回登记态：崩溃窗内废弃是否已执行未知，重发幂等收口。"""
     driver = _started_driver(tmp_path)

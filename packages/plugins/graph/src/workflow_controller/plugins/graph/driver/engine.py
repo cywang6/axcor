@@ -596,6 +596,9 @@ class GraphDriver:
             # 就绪节点启动会改变图状态；本轮返回前与节点档案保持一致。
             self._sync_graph_status(actions)
             actions.extend(self._maybe_finish(world))
+            # 终局评估可能传播失败跳过：重建相操作的收口判定放在其后，
+            # 同轮终态化（skipped/failed）不悬挂到下一轮
+            self._complete_rebuilding_restore_ops()
             return self._persist_before_actions(prior_state, actions)
 
     def prepare_recovery(
@@ -2508,6 +2511,7 @@ class GraphDriver:
             "phase": _OP_PENDING,
             "error": "",
             "new_gen": 0,
+            "terminal_finalized": {},
             "created_at": now,
             "updated_at": now,
         }
@@ -2574,6 +2578,7 @@ class GraphDriver:
             "error": "",
             "new_gen": 0,
             "new_root_epoch": 0,
+            "terminal_finalized": {},
             "created_at": now,
             "updated_at": now,
         }
@@ -2611,6 +2616,7 @@ class GraphDriver:
             "error": record.get("error") or None,
             "new_gen": int(record.get("new_gen", 0) or 0),
             "new_root_epoch": int(record.get("new_root_epoch", 0) or 0),
+            "terminal_finalized": dict(record.get("terminal_finalized") or {}),
             "reason": record.get("reason", ""),
             "created_at": record.get("created_at"),
             "updated_at": record.get("updated_at"),
@@ -2620,21 +2626,16 @@ class GraphDriver:
         """推进回滚操作链：登记态请求经在册性核验后发出废弃动作。
 
         映射或代次已被他者改变（重试清欠账、并发回滚）时操作置失败，
-        不静默吞。已合并链在登记态发集成线回退动作。
+        不静默吞。已合并链在登记态发集成线回退动作。重建相收口统一
+        走轮末的 `_complete_rebuilding_restore_ops`。
         """
         for record in self._state.operations().values():
-            kind = record.get("kind")
-            if kind == "rollback_nodes" and record.get("phase") in (
-                _OP_PENDING,
-                _OP_REBUILDING,
-            ):
-                # 批量链：登记态推进（转相位并同轮发动作），重建相逐轮收口判定；
-                # 废弃相位等回执落切片，不逐轮重发（防在途动作被重复执行）
-                self._advance_batch_restore_op(record, actions)
-                continue
             if record.get("phase") != _OP_PENDING:
                 continue
-            if kind == "rollback_node":
+            kind = record.get("kind")
+            if kind == "rollback_nodes":
+                self._advance_batch_restore_op(record, actions)
+            elif kind == "rollback_node":
                 self._advance_unmerged_restore_op(record, actions)
             elif kind == "rollback_integrated":
                 self._advance_integrated_restore_op(record, actions)
@@ -3067,6 +3068,7 @@ class GraphDriver:
             "absorbed": [],
             "slices": {},
             "covered": [],
+            "terminal_finalized": {},
             "created_at": now,
             "updated_at": now,
         }
@@ -3158,6 +3160,7 @@ class GraphDriver:
             "error": record.get("error") or None,
             "new_gen": int(record.get("new_gen", 0) or 0),
             "new_root_epoch": int(record.get("new_root_epoch", 0) or 0),
+            "terminal_finalized": dict(record.get("terminal_finalized") or {}),
             "reason": record.get("reason", ""),
             "created_at": record.get("created_at"),
             "updated_at": record.get("updated_at"),
@@ -3172,15 +3175,13 @@ class GraphDriver:
         return node_id in (record.get("slices") or {}) or node_id in (record.get("absorbed") or [])
 
     def _advance_batch_restore_op(self, record: dict[str, Any], actions: list[RunAction]) -> None:
-        """批量链推进：登记态全量复核后转相位并同轮发动作，重建相逐轮收口。
+        """批量链推进：登记态全量复核后转相位并同轮发动作。
 
         废弃相位不在此推进——切片随回执增量落账；崩溃恢复经登记态重发
-        （已落账目标在复核中跳过，动作号稳定命中宿主幂等面）。
+        （已落账目标在复核中跳过，动作号稳定命中宿主幂等面）；重建相
+        收口走轮末统一判定。
         """
         phase = record.get("phase")
-        if phase == _OP_REBUILDING:
-            self._check_batch_rebuilding(record)
-            return
         if phase != _OP_PENDING:
             return
         for target in record.get("targets") or []:
@@ -3293,16 +3294,18 @@ class GraphDriver:
     def _check_batch_rebuilding(self, record: dict[str, Any]) -> None:
         """重建收口：全部显式目标新工作区就绪或编排终态化（skipped/failed）。"""
         nodes = self._state.snapshot()["nodes"]
+        finalized: dict[str, str] = {}
         for target in record.get("targets") or []:
             node_id = str(target.get("node_id"))
             info = nodes.get(node_id)
             if info is None:
                 continue  # 已随子图废弃（generator 重新生成），编排归属另有承接
-            if self._state.node_workspace(node_id) is None and info.get("status") not in (
-                "skipped",
-                "failed",
-            ):
-                return
+            if self._state.node_workspace(node_id) is None:
+                status = str(info.get("status"))
+                if status not in ("skipped", "failed"):
+                    return
+                finalized[node_id] = status
+        record["terminal_finalized"] = finalized
         record["phase"] = _OP_SUCCEEDED
         record["updated_at"] = datetime.now(tz=UTC).isoformat()
         self._state.upsert_operation(record)
@@ -3310,6 +3313,46 @@ class GraphDriver:
             "rollback_nodes op %s completed at gen %s",
             record["operation_id"],
             record.get("new_gen"),
+        )
+
+    def _complete_rebuilding_restore_ops(self) -> None:
+        """轮末重建收口：各回滚链按「新工作区就绪 ∨ 编排终态化」边界完成。"""
+        for record in self._state.operations().values():
+            if record.get("phase") != _OP_REBUILDING:
+                continue
+            kind = record.get("kind")
+            if kind == "rollback_nodes":
+                self._check_batch_rebuilding(record)
+            elif kind in ("rollback_node", "rollback_integrated"):
+                self._check_rebuilding_restore_op(record)
+
+    def _check_rebuilding_restore_op(self, record: dict[str, Any]) -> None:
+        """单目标链重建收口：目标新工作区就绪或编排终态化（skipped/failed）。
+
+        终态化分支记入操作记录（terminal_finalized），与工作区就绪路径
+        可区分；目标随子图废弃移除时按已承接收口。
+        """
+        node_id = str(record.get("node_id"))
+        info = self._state.snapshot()["nodes"].get(node_id)
+        if info is None:
+            record["phase"] = _OP_SUCCEEDED  # 已随子图废弃，编排归属另有承接
+            record["updated_at"] = datetime.now(tz=UTC).isoformat()
+            self._state.upsert_operation(record)
+            return
+        if self._state.node_workspace(node_id) is not None:
+            self._complete_rebuilding_operations(node_id)
+            return
+        status = str(info.get("status"))
+        if status not in ("skipped", "failed"):
+            return
+        record["terminal_finalized"] = {node_id: status}
+        record["phase"] = _OP_SUCCEEDED
+        record["updated_at"] = datetime.now(tz=UTC).isoformat()
+        self._state.upsert_operation(record)
+        logger.info(
+            "rollback op %s finalized by terminal state %s",
+            record["operation_id"],
+            status,
         )
 
     def _fall_batch_slice(
@@ -3495,6 +3538,10 @@ class GraphDriver:
             candidate,
         )
         if plan is None:
+            # 目标代次已被他者推进：切片跳过，但本链废弃回执已确认作用域
+            # 物理移除——映射必须同步清除，否则目标重排起步的欠账清理会
+            # 携旧代次再废弃一次而失败
+            self._state.clear_node_workspace(node_id)
             slices[node_id] = {
                 "status": "skipped",
                 "gen": 0,
