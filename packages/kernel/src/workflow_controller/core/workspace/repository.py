@@ -162,7 +162,7 @@ class WorkspaceRepository:
         self.workspaces_dir = self.tree_dir / "workspaces"
 
     def workspace_dir_for(self, scope_key: str) -> Path:
-        """作用域键的默认工作区目录（按转义键命名，账面键保持原样）。"""
+        """作用域键的默认工作区目录（目录名取转义键，作用域键原样保留）。"""
         return self.workspaces_dir / _escape_scope_key(scope_key)
 
     async def import_baseline(self, *, writer_local_pathspecs: Sequence[str]) -> RootRefs:

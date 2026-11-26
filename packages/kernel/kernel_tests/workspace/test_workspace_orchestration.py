@@ -245,7 +245,7 @@ async def test_abandon_releases_workspace_and_rebuild_uses_latest_head(tmp_path:
 
 
 async def test_scope_key_with_colon_round_trips_prepare_and_rebuild(tmp_path: Path) -> None:
-    """含冒号的作用域键（运行时子图节点）建区/集成/换代重建全程可用，账面保留原键。"""
+    """含冒号的作用域键（运行时子图节点）建区/集成/换代重建全程可用，记录保留原键。"""
     root, repository, manager = build_workspace(tmp_path)
     orchestrator = FakeOrchestrator(manager)
     await orchestrator.bootstrap_root()
@@ -256,7 +256,7 @@ async def test_scope_key_with_colon_round_trips_prepare_and_rebuild(tmp_path: Pa
     integrated = await orchestrator.integrate("gen:child-w1")
 
     assert isinstance(integrated, ScopeIntegrated)
-    assert prepared.scope_id == "gen:child-w1"  # 账面键保持原始节点 ID
+    assert prepared.scope_id == "gen:child-w1"  # 作用域记录保留原始节点 ID
     assert (root / "design" / "sub.md").read_text(encoding="utf-8") == "from-sub\n"
     run_git(["check-ref-format", "--branch", "scope/gen%3Achild-w1"], repository.repo_dir)
 

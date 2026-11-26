@@ -202,7 +202,7 @@ async def test_first_layer_scope_materializes_writer_local_from_seed(
 
 
 async def test_scope_key_with_colon_maps_to_valid_branch(tmp_path: Path) -> None:
-    """子图节点式作用域键（含冒号）：分支名与目录名按转义键映射，账面键不变。"""
+    """子图节点式作用域键（含冒号）：分支名与目录名按转义键映射，作用域键不变。"""
     root = tmp_path / "root"
     root.mkdir()
     _make_user_workspace(root)
