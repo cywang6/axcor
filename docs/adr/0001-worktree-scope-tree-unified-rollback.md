@@ -4,7 +4,7 @@ title: "ADR-0001：采用 git worktree 写者作用域树实现工作区隔离�
 status: Accepted
 owner: "chenyangwang"
 created: 2026-11-23
-updated: 2026-11-25
+updated: 2026-11-26
 related_specs:
   - docs/specs/traceback-workspace-rollback.md
   - docs/specs/rsi-online-repair-loop.md
@@ -69,6 +69,15 @@ Accepted（2026-11-23）。协议于 2026-11-24 冻结（S0a 三轮评审落档�
 | D13 操作粒度 | **单 operation 整体追踪**：一个 `client_op_id` 一条操作记录，相位整体推进，轮询面与单目标链一致 |
 
 既有单目标链（`rollback_node`/`rollback_integrated`）语义与消费面不变；批量为新 op，单目标批量请求与对应单目标链语义等价。
+
+### 补充决策（2026-11-26）：空集成作用域的回退处理
+
+已通过但未改动 merge 路径文件的作用域（空集成）在集成线上没有集成提交，回退按账面处理、不引入多余线动作：
+
+| 决策 | 选择 |
+|---|---|
+| D14 空集成目标 | **直接进失效集废弃重建**：不参与回退点与谱系基准、免线位置与区间校验；目标集全部为空集成时回退点即当前集成头，线与根检出不动，root epoch 照常 +1 |
+| D15 保留者重放集 | **重放只恢复被回退撤下的集成**（集成提交严格晚于回退点）：空集成保留者原样保留不重放；回退点之前的集成原样在线、不重复落提交 |
 
 ## 被否决的方案
 

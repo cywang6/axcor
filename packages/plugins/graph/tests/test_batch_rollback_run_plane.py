@@ -1034,3 +1034,84 @@ async def test_invalid_target_rejects_whole_request_zero_change(tmp_path: Path) 
         == {}
     )
     await env.coord.stop_run(run_id)
+
+
+def _empty_integration_workflow(tmp: Path) -> Path:
+    """空集成批量现场：b 首轮无文件改动（空集成），a/c 各写一文件，down 长眠保活。
+
+    b 重跑轮以 a.txt 在场判别（首轮 a 尚未运行、重跑轮 a 保留者已集成），
+    产出 b2.txt 使 down 的重跑轮快速通过。
+    """
+    nodes = [
+        _bash_node("b", "if [ -f a.txt ]; then printf rerun > b2.txt; else true; fi"),
+        _bash_node("a", "printf a > a.txt", depends_on=["b"]),
+        _bash_node("c", "printf c > c.txt", depends_on=["b"]),
+        _bash_node(
+            "down",
+            "if [ -f b2.txt ]; then printf done > down.txt; else sleep 300; fi",
+            depends_on=["a", "b", "c"],
+        ),
+    ]
+    return _write_workflow(tmp / "wf-batch-empty.yaml", nodes)
+
+
+async def _empty_scene_ready(env: GraphRunPlaneEnv, run_id: str) -> bool:
+    """空集成现场就绪：a/b/c 已通过、down 长眠在途。"""
+    return (
+        all(env.node_info(run_id, n)["status"] == "passed" for n in ("a", "b", "c"))
+        and env.node_info(run_id, "down")["status"] == "running"
+        and bool(env.node_info(run_id, "down").get("workspace_path"))
+    )
+
+
+async def test_batch_rollback_with_empty_integration_node(tmp_path: Path) -> None:
+    """空集成节点不阻塞批量回滚：与真实目标一并撤回，保留者不重跑，整图完成。"""
+    env = GraphRunPlaneEnv(tmp_path)
+    yaml_path = _empty_integration_workflow(env.tmp)
+    run_id = await env.start_graph_run(yaml_path=yaml_path)
+    await _wait_until(lambda: _empty_scene_ready(env, run_id), 30.0, "空集成批量现场未就绪")
+
+    pre_scopes = await _run_scopes(env, run_id)
+    a_before = dict(_scope_row("a", pre_scopes))
+    b_old = _scope_row("b", pre_scopes)["scope_id"]
+    c_old = _scope_row("c", pre_scopes)["scope_id"]
+
+    await env.coord.pause_run(run_id)
+    result = await _request_batch_rollback(
+        env,
+        run_id,
+        [{"node_id": "b", "expected_epoch": 1}, {"node_id": "c", "expected_epoch": 1}],
+        "empty-1",
+        expected_root_epoch=1,
+    )
+    assert result["targets"] == ["b", "c"]
+    await env.coord.resume_run(run_id)
+
+    record = await _wait_op_phase(env, run_id, "empty-1", "succeeded")
+    assert record["new_gen"] == 1
+    assert record["new_root_epoch"] == 2
+    assert record["merged_from"] == {}
+
+    # 账面：空集成目标与真实目标一并废弃换代；保留者 a 零变化；根代次 +1
+    scopes = await _run_scopes(env, run_id)
+    assert scopes[f"{run_id}-root"]["root_epoch"] == 2
+    for old_id in (b_old, c_old):
+        assert scopes[old_id]["state"] == "discarded"
+        assert scopes[old_id]["scope_epoch"] == 2
+    a_after = _scope_row("a", scopes)
+    for key in ("scope_epoch", "root_epoch", "state", "integration_base_commit"):
+        assert a_after[key] == a_before[key], key
+
+    # 编排：b/c/down 进新代重跑；谱系不含目标集成的保留者 a 不重跑
+    assert env.node_info(run_id, "a")["gen"] == 0
+    for node_id in ("b", "c", "down"):
+        assert env.node_info(run_id, node_id)["gen"] == 1, node_id
+
+    await await_run_status(env, run_id, {"completed"}, timeout_s=60.0)
+    # 根检出：保留者产物在场、目标产物经重跑重建、空集成节点首轮本无产物
+    assert _root_checkout(env) == {
+        "a.txt": "a",
+        "b2.txt": "rerun",
+        "c.txt": "c",
+        "down.txt": "done",
+    }
