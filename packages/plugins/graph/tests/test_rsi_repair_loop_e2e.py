@@ -288,6 +288,22 @@ async def test_rsi_repair_loop_timeout_to_rollback_to_completion(tmp_path: Path)
     work_root = env.tmp / "wd"
     assert (work_root / ".workflow-controller" / "scopes" / run_id / "repo.git").is_dir()
 
+    # 目标重跑再度通过后走已合并链受理：携带旧作用域检查点的新请求被拒
+    # （旧检查点对不上当前作用域；须在整图完成前请求，run 终态后无运行时）
+    async def _target_repassed() -> bool:
+        return env.node_info(run_id, "target")["status"] == "passed"
+
+    await _wait_until(_target_repassed, 15.0, "target 未再度通过")
+    with pytest.raises(ValueError, match="scope_start 检查点"):
+        await api.request_run_rollback(
+            run_id,
+            node_id="target",
+            client_op_id="rsi-repair-3",
+            expected_epoch=target_scope["scope_epoch"],
+            scope_id=target_scope["scope_id"],
+            checkpoint_id=scope_start["checkpoint_id"],
+        )
+
     # f. 下游继续 → 整图完成：根检出（集成线物化）三节点产物齐备
     run = await await_run_status(env, run_id, {"completed"}, timeout_s=30.0)
     assert run.status == "completed"
