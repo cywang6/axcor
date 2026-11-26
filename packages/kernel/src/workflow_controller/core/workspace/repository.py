@@ -30,6 +30,7 @@ import logging
 import os
 import re
 import shutil
+import string
 import subprocess
 import uuid
 from dataclasses import dataclass
@@ -75,6 +76,20 @@ _BASELINE_EXCLUDE_PATHSPECS = (
 
 # 作用域分支前缀，作用域工作区与检查点提交一律落该命名空间
 _SCOPE_BRANCH_PREFIX = "scope/"
+
+# 作用域键进入分支名/目录名时原样保留的字符；其余字符（含 % 自身）按 UTF-8 逐字节 %XX 编码
+_SCOPE_KEY_SAFE_CHARS = frozenset(string.ascii_letters + string.digits + "_-")
+
+
+def _escape_scope_key(scope_key: str) -> str:
+    """作用域键转义为合法且互不冲突的分支名/目录名组件。"""
+    return "".join(
+        char
+        if char in _SCOPE_KEY_SAFE_CHARS
+        else "".join(f"%{byte:02X}" for byte in char.encode("utf-8", "surrogatepass"))
+        for char in scope_key
+    )
+
 
 # 每次 checkout 传入的路径数上限，避免超长命令行
 _CHECKOUT_PATH_CHUNK = 200
@@ -146,6 +161,10 @@ class WorkspaceRepository:
         self.repo_dir = self.tree_dir / "repo.git"
         self.workspaces_dir = self.tree_dir / "workspaces"
 
+    def workspace_dir_for(self, scope_key: str) -> Path:
+        """作用域键的默认工作区目录（按转义键命名，账面键保持原样）。"""
+        return self.workspaces_dir / _escape_scope_key(scope_key)
+
     async def import_baseline(self, *, writer_local_pathspecs: Sequence[str]) -> RootRefs:
         """导入基线并建立根双引用；私有仓已存在或 git 缺席时拒绝。"""
         if shutil.which("git") is None:
@@ -180,15 +199,15 @@ class WorkspaceRepository:
     ) -> ScopeWorkspace:
         """建作用域工作区：自 base_commit 检出、按需物化路径后提交建区基线。
 
-        workspace_dir 显式指定落点（默认 ``workspaces/<scope_key>``），
-        分支名始终取 scope_key——单会话主写者的固定 ``root/`` 落点用它
-        保住建区代次命名的分支空间。
+        workspace_dir 显式指定落点（默认 ``workspaces/<转义作用域键>``）；
+        分支名与默认目录名均取转义作用域键——单会话主写者的固定
+        ``root/`` 落点用它保住建区代次命名的分支空间。
         """
         if not scope_key or "/" in scope_key:
             raise WorkspaceRepositoryError(f"非法 scope_key：{scope_key!r}")
-        branch = f"{_SCOPE_BRANCH_PREFIX}{scope_key}"
+        branch = f"{_SCOPE_BRANCH_PREFIX}{_escape_scope_key(scope_key)}"
         workspace_path = (
-            workspace_dir if workspace_dir is not None else self.workspaces_dir / scope_key
+            workspace_dir if workspace_dir is not None else self.workspace_dir_for(scope_key)
         )
         if workspace_path.exists():
             raise WorkspaceRepositoryError(f"作用域工作区已存在：{workspace_path}")
@@ -224,7 +243,7 @@ class WorkspaceRepository:
         """
         if not scope_key or "/" in scope_key:
             raise WorkspaceRepositoryError(f"非法 scope_key：{scope_key!r}")
-        workspace_path = self.workspaces_dir / scope_key
+        workspace_path = self.workspace_dir_for(scope_key)
         if workspace_path.exists():
             raise WorkspaceRepositoryError(f"作用域工作区已存在：{workspace_path}")
         await self._run_repo_git(
@@ -297,7 +316,7 @@ class WorkspaceRepository:
         if workspace_dir.exists():
             with contextlib.suppress(WorkspaceRepositoryError):
                 await self._run_repo_git(["worktree", "remove", "--force", str(workspace_dir)])
-        prefix = f"{_SCOPE_BRANCH_PREFIX}{scope_key}"
+        prefix = f"{_SCOPE_BRANCH_PREFIX}{_escape_scope_key(scope_key)}"
         out = await self._run_repo_git(
             ["for-each-ref", "--format=%(refname:short)", f"refs/heads/{prefix}"]
         )

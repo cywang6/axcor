@@ -244,6 +244,34 @@ async def test_abandon_releases_workspace_and_rebuild_uses_latest_head(tmp_path:
     assert (root / "design" / "retry.md").read_text(encoding="utf-8") == "retry\n"
 
 
+async def test_scope_key_with_colon_round_trips_prepare_and_rebuild(tmp_path: Path) -> None:
+    """含冒号的作用域键（运行时子图节点）建区/集成/换代重建全程可用，账面保留原键。"""
+    root, repository, manager = build_workspace(tmp_path)
+    orchestrator = FakeOrchestrator(manager)
+    await orchestrator.bootstrap_root()
+
+    prepared = await orchestrator.prepare("gen:child-w1")
+    workspace = Path(prepared.workspace_path)
+    (workspace / "design" / "sub.md").write_text("from-sub\n", encoding="utf-8")
+    integrated = await orchestrator.integrate("gen:child-w1")
+
+    assert isinstance(integrated, ScopeIntegrated)
+    assert prepared.scope_id == "gen:child-w1"  # 账面键保持原始节点 ID
+    assert (root / "design" / "sub.md").read_text(encoding="utf-8") == "from-sub\n"
+    run_git(["check-ref-format", "--branch", "scope/gen%3Achild-w1"], repository.repo_dir)
+
+    abandoned = await orchestrator.abandon("gen:child-w1", expected_scope_epoch=1)
+    rebuilt = await orchestrator.prepare("gen:child-w1")
+
+    assert abandoned.new_scope_epoch == 2
+    assert rebuilt.scope_epoch == 2
+    # 换代分支同样合法：转义键 + -e<代次> 后缀
+    rebuilt_branch = (await manager.get_scope("gen:child-w1")).workspace_ref.rpartition("|")[2]
+    assert rebuilt_branch == "scope/gen%3Achild-w1-e2"
+    run_git(["check-ref-format", "--branch", rebuilt_branch], repository.repo_dir)
+    assert Path(rebuilt.workspace_path).exists()
+
+
 async def test_release_after_integration_prunes_worktree_keeps_branch(tmp_path: Path) -> None:
     """集成后回收：工作树裁剪、账面转已释放，分支与提交留存。"""
     _root, repository, manager = build_workspace(tmp_path)

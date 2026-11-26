@@ -70,6 +70,54 @@ async def test_bash_run_writes_inside_scope_workspace(tmp_path: Path) -> None:
     assert env.node_info(run_id, "n1")["status"] == "passed"
 
 
+async def test_subgraph_child_with_colon_id_gets_valid_workspace_branch(
+    tmp_path: Path,
+) -> None:
+    """子图子节点（ID 含冒号）建区：分支名转义后合法，run 完成且产出集成。"""
+    env = GraphRunPlaneEnv(tmp_path)
+    work_root = env.tmp / "wd"
+    work_root.mkdir()
+    (work_root / "sub.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "workflow": "sub",
+                "max_parallel": 1,
+                "work_dir": ".",
+                "nodes": [
+                    {
+                        "id": "s1",
+                        "task_type": "bash",
+                        "command": "echo sub-done > sub-out.txt",
+                        "acceptance": {"enabled": False},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    yaml_path = _write_traceback_workflow(
+        env.tmp,
+        [
+            {
+                "id": "gen",
+                "task_type": "subgraph",
+                "file": "sub.yaml",
+                "acceptance": {"enabled": False},
+            }
+        ],
+    )
+    run_id = await env.start_graph_run(yaml_path=yaml_path)
+
+    run = await await_run_status(env, run_id, {"completed"})
+
+    assert run.status == "completed"
+    assert (work_root / "sub-out.txt").read_text(encoding="utf-8").strip() == "sub-done"
+    assert env.node_info(run_id, "gen:s1")["status"] == "passed"
+    # 子节点作用域分支按转义键留存：冒号编码为 %3A，为合法分支名
+    repo_git = work_root / ".workflow-controller" / "scopes" / run_id / "repo.git"
+    assert (repo_git / "refs" / "heads" / "scope" / "gen%3As1-w1").is_file()
+
+
 async def test_parallel_nodes_isolate_then_integrate_into_root(tmp_path: Path) -> None:
     """双节点并行写不相交路径：隔离期互不可见，依次集成后根检出含双方产出。"""
     env = GraphRunPlaneEnv(tmp_path)

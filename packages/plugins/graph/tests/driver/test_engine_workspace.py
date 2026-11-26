@@ -21,6 +21,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import yaml
+
 from workflow_controller.plugin.run_driver import (
     RunNotification,
     RunSessionInfo,
@@ -41,7 +43,7 @@ from workflow_controller.plugin.workspace import (
     WorkspaceActionFailed,
 )
 
-from .test_engine import build_driver, decide, pick, proc_exit
+from .test_engine import _SUB_YAML, _artifact, build_driver, decide, pick, proc_exit
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -246,6 +248,36 @@ def test_workspace_disabled_keeps_shared_cwd(tmp_path: Path) -> None:
     assert len(procs) == 1
     assert procs[0].cwd == str(tmp_path)
     assert not procs[0].env
+
+
+def test_merged_subgraph_node_keeps_colon_id_in_scope_key(tmp_path: Path) -> None:
+    """运行时子图节点（ID 含冒号）建区：作用域键保留原始节点 ID。"""
+    driver = build_driver(
+        tmp_path,
+        [
+            {
+                "id": "gen",
+                "task_type": "generator",
+                "generator_type": "bash",
+                "command": "cat > sub.yaml",
+                "subgraph": {"output": "sub.yaml"},
+                "acceptance": {"enabled": True, "type": "script", "script": "true"},
+            }
+        ],
+        traceback=_TRACEBACK_CFG,
+    )
+    decide(driver)  # gen 建区（gen-w1）
+    decide(driver, (prepared_note("node=gen"),))  # type: ignore[arg-type]
+    decide(driver, (proc_exit("node=gen", 0),))  # 执行完成 → 终态提交
+    decide(driver, (terminal_note("node=gen"),))  # type: ignore[arg-type]
+    decide(driver, (_artifact("node=gen", "sub.yaml", yaml.safe_dump(_SUB_YAML)),))
+    decide(driver, (proc_exit("node=gen/verify", 0),))  # 验收通过 → 待集成
+    actions = decide(driver, (integrated_note("node=gen"),))  # type: ignore[arg-type]
+    # 集成回执到达即并图：子节点起步先建区
+
+    prepares = pick(actions, PrepareScopeWorkspace)
+    assert [prepare.scope_key for prepare in prepares] == ["gen:s1-w4"]
+    assert prepares[0].owner_ref == "gen:s1"
 
 
 def test_late_workspace_note_after_activation_ignored(tmp_path: Path) -> None:

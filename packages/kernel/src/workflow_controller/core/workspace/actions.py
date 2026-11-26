@@ -63,7 +63,7 @@ class ScopeWorkspaceSpec:
 class PrepareScopeWorkspace:
     """建区动作请求：在父作用域当前头建子工作区并登记账本。
 
-    workspace_dir 显式指定工作区落点（默认 workspaces/<scope_key>）：
+    workspace_dir 显式指定工作区落点（默认按作用域键转义落 workspaces/ 下）：
     单会话主写者用固定 ``root/`` 落点承载终态检出。
     """
 

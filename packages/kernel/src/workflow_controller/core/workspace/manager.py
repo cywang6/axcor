@@ -852,7 +852,7 @@ class WorkspaceManager:
             candidate = (
                 workspace_dir
                 if workspace_dir is not None
-                else self._repository.workspaces_dir / workspace_scope_key
+                else self._repository.workspace_dir_for(workspace_scope_key)
             )
             if candidate.exists():
                 with suppress(Exception):
