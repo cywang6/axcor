@@ -208,7 +208,10 @@ async def test_rsi_repair_loop_timeout_to_rollback_to_completion(tmp_path: Path)
     assert len(scope_start["workspace_commit"]) == 40  # 真实 git 提交
 
     # d. 模拟修复应用：patch 工作流源文件 → 原地重载定义（Run 不换）
-    _write_loop_workflow(yaml_path, "echo fixed > target.txt && cat upstream.txt >> target.txt")
+    # 重载命令带短眠：rsi-repair-2 请求须在目标再度通过前发出，未合并链的拒绝面才确定
+    _write_loop_workflow(
+        yaml_path, "sleep 2 && echo fixed > target.txt && cat upstream.txt >> target.txt"
+    )
     reloaded = await api.reload_run_definition(run_id)
     assert reloaded["reloaded"] is True
     run = await env.store.get(run_id)

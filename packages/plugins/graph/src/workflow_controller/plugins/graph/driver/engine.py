@@ -2858,7 +2858,9 @@ class GraphDriver:
                 continue
             if note.context != f"node={record['node_id']}":
                 continue
-            if note.new_root_epoch != int(record.get("expected_root_epoch", 0)) + 1:
+            # 线未动的回退（目标集全为空集成）不推进根代次：回执为旧值或旧值 +1
+            expected_root_epoch = int(record.get("expected_root_epoch", 0))
+            if note.new_root_epoch not in (expected_root_epoch, expected_root_epoch + 1):
                 self._fail_operation(record, f"集成线回退回执根代次异常：{note.new_root_epoch}")
                 return
             invalidated_scopes = {scope_id for scope_id, _epoch in note.invalidated}
@@ -3407,7 +3409,9 @@ class GraphDriver:
             return True  # 已落账（崩溃恢复幂等重放回执）：不重复落
         targets = record.get("targets") or []
         merged_targets = [t for t in targets if t.get("merged")]
-        if note.new_root_epoch != int(record.get("expected_root_epoch") or 0) + 1:
+        # 线未动的回退（目标集全为空集成）不推进根代次：回执为旧值或旧值 +1
+        expected_root_epoch = int(record.get("expected_root_epoch") or 0)
+        if note.new_root_epoch not in (expected_root_epoch, expected_root_epoch + 1):
             self._fail_operation(record, f"集成线回退回执根代次异常：{note.new_root_epoch}")
             return True
         invalidated_scopes = {scope_id for scope_id, _epoch in note.invalidated}

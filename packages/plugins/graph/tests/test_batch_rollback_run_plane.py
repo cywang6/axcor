@@ -1092,7 +1092,7 @@ async def test_batch_rollback_with_empty_integration_node(tmp_path: Path) -> Non
     assert record["new_root_epoch"] == 2
     assert record["merged_from"] == {}
 
-    # 账面：空集成目标与真实目标一并废弃换代；保留者 a 零变化；根代次 +1
+    # 作用域记录：空集成目标与真实目标一并废弃换代；保留者 a 零变化；根代次 +1
     scopes = await _run_scopes(env, run_id)
     assert scopes[f"{run_id}-root"]["root_epoch"] == 2
     for old_id in (b_old, c_old):
@@ -1115,3 +1115,61 @@ async def test_batch_rollback_with_empty_integration_node(tmp_path: Path) -> Non
         "c.txt": "c",
         "down.txt": "done",
     }
+
+
+def _empty_only_rollback_workflow(tmp: Path) -> Path:
+    """仅空集成目标回滚现场：b 首轮无文件改动，a/c 各写一文件，down 短眠在途。"""
+    nodes = [
+        _bash_node("b", "true"),
+        _bash_node("a", "printf a > a.txt", depends_on=["b"]),
+        _bash_node("c", "printf c > c.txt", depends_on=["b"]),
+        _bash_node("down", "sleep 3 && printf done > down.txt", depends_on=["a", "b", "c"]),
+    ]
+    return _write_workflow(tmp / "wf-batch-empty-only.yaml", nodes)
+
+
+async def test_batch_rollback_of_only_empty_node_keeps_inflight_downstream(
+    tmp_path: Path,
+) -> None:
+    """仅回滚空集成节点（不暂停）：线不动、根代次不推进，在途下游不重跑、
+    其集成不被旧根代次拒绝，整图完成。"""
+    env = GraphRunPlaneEnv(tmp_path)
+    yaml_path = _empty_only_rollback_workflow(env.tmp)
+    run_id = await env.start_graph_run(yaml_path=yaml_path)
+    await _wait_until(lambda: _empty_scene_ready(env, run_id), 30.0, "仅空集成回滚现场未就绪")
+
+    pre_scopes = await _run_scopes(env, run_id)
+    a_before = dict(_scope_row("a", pre_scopes))
+    b_old = _scope_row("b", pre_scopes)["scope_id"]
+
+    # 不暂停：down 在途时直接受理（线不动形态的可达现场）
+    result = await _request_batch_rollback(
+        env,
+        run_id,
+        [{"node_id": "b", "expected_epoch": 1}],
+        "empty-only-1",
+        expected_root_epoch=1,
+    )
+    assert result["targets"] == ["b"]
+
+    record = await _wait_op_phase(env, run_id, "empty-only-1", "succeeded")
+    assert record["new_gen"] == 1
+    assert record["new_root_epoch"] == 1  # 线不动：根代次不推进
+
+    # 作用域记录：仅空集成目标废弃换代；保留者 a 零变化；根代次不动
+    scopes = await _run_scopes(env, run_id)
+    assert scopes[f"{run_id}-root"]["root_epoch"] == 1
+    assert scopes[b_old]["state"] == "discarded"
+    assert scopes[b_old]["scope_epoch"] == 2
+    a_after = _scope_row("a", scopes)
+    for key in ("scope_epoch", "root_epoch", "state", "integration_base_commit"):
+        assert a_after[key] == a_before[key], key
+
+    # 编排：空集成目标换代重跑；谱系与在途下游不受牵连（不重跑）
+    assert env.node_info(run_id, "b")["gen"] == 1
+    for node_id in ("a", "c", "down"):
+        assert env.node_info(run_id, node_id)["gen"] == 0, node_id
+
+    # 在途下游完成后照常集成（基线仍属当前根代次），整图完成不失败
+    await await_run_status(env, run_id, {"completed"}, timeout_s=60.0)
+    assert _root_checkout(env) == {"a.txt": "a", "c.txt": "c", "down.txt": "done"}

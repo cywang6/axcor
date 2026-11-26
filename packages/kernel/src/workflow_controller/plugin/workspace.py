@@ -187,12 +187,13 @@ class RetractTarget:
 
 @dataclass(frozen=True)
 class RetractIntegrationLine(RunAction):
-    """集成线回退动作：宿主把集成线回退到目标集建区基线的最早者。
+    """集成线回退动作：宿主把集成线回退到目标集建区基线的最早者（空集成目标不参与）。
 
     逐目标先校验后 reset（在册、属当前集成线、是当前头祖先、区间不
-    含自建路径变更），任一不满足零改动拒绝；保留者按原集成序换序重
-    放，根代次 +1、失效作用域废弃；expected_root_epoch 为旧根代次，
-    不匹配拒绝。
+    含自建路径变更；线上无集成提交的空集成目标免线位置与区间校验），
+    任一不满足零改动拒绝；保留者按原集成序换序重放，根代次随线动 +1
+    （目标集全为空集成时线不动、根代次不推进）、失效作用域废弃；
+    expected_root_epoch 为受理时的根代次，不匹配拒绝。
     """
 
     targets: tuple[RetractTarget, ...]
@@ -216,9 +217,12 @@ class ScopeRestored(RunNotification):
 class IntegrationLineRetracted(RunNotification):
     """集成线回退完成通知：新线头、新根代次与失效/保留划分。
 
-    target_commit 为回退点（各撤回目标建区基线在首父链上的最早者）；
-    invalidated 为失效作用域及其新代次（全部撤回目标在列），preserved
-    为按原集成序重放的保留者（不重跑）。
+    target_commit 为回退点（线上有集成提交的各目标建区基线在首父链
+    上的最早者，目标集全为空集成时即当前头）；invalidated 为失效作用
+    域及其新代次（全部撤回目标在列）；preserved 只列被重放的保留者
+    （空集成与回退点之前已集成的保留者不重放、不在其中，也不在
+    invalidated 内）；线不动时 new_root_head 即旧头、new_root_epoch
+    不变。
     """
 
     new_root_head: str

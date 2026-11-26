@@ -285,6 +285,47 @@ async def test_recovery_completes_multi_target_retract_after_crash(
     }
 
 
+async def test_recovery_completes_empty_only_retract_without_epoch_advance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """仅空集成目标（线不动）在废弃前崩溃：补齐废弃换代，根代次不推进。"""
+    from workflow_controller.core.workspace.scope_tree import AbandonedScope
+
+    site = _CrashSite(tmp_path)
+    await site.build()
+    # 空集成为真实 git 事实：不释放工作区（保持活动态在盘，补账废弃面）
+    await site.prepare("node-empty")
+    outcome = await site.orchestrator.integrate("node-empty")
+    assert isinstance(outcome, ScopeIntegrated)
+
+    async def exploding(self: WorkspaceManager, target: object) -> list[AbandonedScope]:
+        raise RuntimeError("崩溃注入：线记录后废弃前")
+
+    monkeypatch.setattr(WorkspaceManager, "_abandon_scope_physically", exploding)
+    with pytest.raises(RuntimeError, match="崩溃注入"):
+        await site.manager.retract_integration_line(
+            targets=(RetractTarget(scope_id="node-empty", base_commit=site.bases["node-empty"]),),
+            expected_root_epoch=1,
+            client_op_id="retract-empty-crash",
+        )
+    monkeypatch.undo()
+
+    manager, report = await site.rebuild()
+
+    assert report.completed_op_ids == ["retract-empty-crash"]
+    assert report.root_epoch == 1  # 线不动：恢复后根代次仍为 1
+    states = {r.scope_id: (r.state, r.scope_epoch) for r in await manager.list_scopes()}
+    assert states["node-empty"] == (ScopeState.DISCARDED, 2)
+    # 重放命中已落定缓存：返回原结果、根代次不变
+    replay = await manager.retract_integration_line(
+        targets=(RetractTarget(scope_id="node-empty", base_commit=site.bases["node-empty"]),),
+        expected_root_epoch=1,
+        client_op_id="retract-empty-crash",
+    )
+    assert replay.new_root_epoch == 1
+    assert {scope for scope, _epoch in replay.invalidated} == {"node-empty"}
+
+
 async def test_recovery_abandons_uneffective_prepared_op(tmp_path: Path) -> None:
     """意图未生效（头未动）：恢复即放弃，不重放。"""
     site = _CrashSite(tmp_path)

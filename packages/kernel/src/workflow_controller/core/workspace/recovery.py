@@ -251,7 +251,9 @@ def _infer_root_epoch(records: Sequence[ScopeRecord], operations: Sequence[SagaO
             OperationPhase.GIT_WRITTEN,
             OperationPhase.COMMITTED,
         ):
-            epoch = max(epoch, operation.root_epoch + 1)
+            # 线未动（已记新头即旧头）的回退不推进根代次
+            advance = 1 if operation.actual_new_head != operation.expected_old_head else 0
+            epoch = max(epoch, operation.root_epoch + advance)
     return epoch
 
 

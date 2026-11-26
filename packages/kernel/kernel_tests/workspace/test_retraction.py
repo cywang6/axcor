@@ -73,10 +73,10 @@ class _LineageSite:
         await self.integrate("node-d")
         # e 保持活动：基线不含 a 的集成，回退后按旧根代次拒绝其集成
 
-    async def build_empty_integration_scene(self) -> None:
+    async def build_empty_integration_scene(self) -> Path:
         """空集成现场：empty 无文件改动通过，a/c 各写一文件并集成，down 为下游活动写者。"""
         await self.orchestrator.bootstrap_root()
-        await self.prepare("node-empty")
+        ws_empty = await self.prepare("node-empty")
         await self.integrate("node-empty")  # 通过但未改动文件：线上无集成提交
         ws_a = await self.prepare("node-a")
         ws_c = await self.prepare("node-c")
@@ -84,7 +84,9 @@ class _LineageSite:
         (ws_c / "design" / "c.md").write_text("from-c\n", encoding="utf-8")
         await self.integrate("node-a")
         await self.integrate("node-c")
-        await self.prepare("node-down")  # 下游活动写者：建区基线含 a/c 的集成
+        ws_down = await self.prepare("node-down")  # 下游活动写者：建区基线含 a/c 的集成
+        (ws_down / "design" / "down.md").write_text("from-down\n", encoding="utf-8")
+        return ws_empty
 
     async def retract_a(
         self, *, client_op_id: str = "retract-1", epoch: int = 1
@@ -493,7 +495,7 @@ async def test_retraction_with_empty_integration_target(tmp_path: Path) -> None:
 
 
 async def test_retraction_of_only_empty_target_keeps_line_untouched(tmp_path: Path) -> None:
-    """目标集全部为空集成：线与根检出不动，仅目标自身失效换代。"""
+    """目标集全部为空集成：线与根检出不动、根代次不推进，在途下游照常集成。"""
     site = _LineageSite(tmp_path)
     await site.build_empty_integration_scene()
     head_before = await site.manager.current_integration_head()
@@ -503,11 +505,11 @@ async def test_retraction_of_only_empty_target_keeps_line_untouched(tmp_path: Pa
         expected_root_epoch=1,
         client_op_id="retract-empty-only",
     )
-    # 无集成提交可撤：回退点即当前头，线不动、保留者不重放
+    # 无集成提交可撤：回退点即当前头，线不动、保留者不重放、根代次不推进
     assert result.new_root_head == head_before
     assert result.target_commit == head_before
     assert result.preserved == ()
-    assert result.new_root_epoch == 2
+    assert result.new_root_epoch == 1
     # 线上无人消费过空集成的成果：真实写者与下游零触碰
     assert {scope for scope, _epoch in result.invalidated} == {"node-empty"}
     for key in ("node-a", "node-c", "node-down"):
@@ -516,6 +518,9 @@ async def test_retraction_of_only_empty_target_keeps_line_untouched(tmp_path: Pa
         assert record.scope_epoch == 1
     for name in ("a.md", "c.md"):
         assert (site.root / "design" / name).exists()
+    # 基线仍属当前根代次的在途写者：回退后集成不被旧代次拒绝
+    await site.integrate("node-down")
+    assert (site.root / "design" / "down.md").read_text(encoding="utf-8") == "from-down\n"
 
 
 async def test_retraction_of_empty_target_created_at_current_head(tmp_path: Path) -> None:
@@ -533,8 +538,64 @@ async def test_retraction_of_empty_target_created_at_current_head(tmp_path: Path
         client_op_id="retract-empty-head",
     )
     assert result.new_root_head == head
-    assert result.new_root_epoch == 2
+    assert result.new_root_epoch == 1  # 线不动：根代次不推进
     record = await site.manager.get_scope("node-empty")
     assert record is not None
     assert record.state is ScopeState.DISCARDED
     assert record.scope_epoch == 2
+
+
+async def test_retraction_with_reintegrated_preserver(tmp_path: Path) -> None:
+    """同作用域两次集成、回退点落在两条集成提交之间：最新集成须重放。"""
+    site = _LineageSite(tmp_path)
+    await site.orchestrator.bootstrap_root()
+    ws_s = await site.prepare("node-s")
+    (ws_s / "design" / "s1.md").write_text("s1\n", encoding="utf-8")
+    await site.integrate("node-s")  # 第一次集成
+    ws_t = await site.prepare("node-t")  # T 建区基线即第一次集成提交
+    (ws_t / "design" / "t.md").write_text("t\n", encoding="utf-8")
+    await site.orchestrator.abandon("node-s", 1)  # S 废弃重建后再次集成
+    ws_s2 = await site.prepare("node-s")
+    (ws_s2 / "design" / "s2.md").write_text("s2\n", encoding="utf-8")
+    await site.integrate("node-s")  # 第二次集成
+    await site.integrate("node-t")
+
+    result = await site.manager.retract_integration_line(
+        targets=(RetractTarget(scope_id="node-t", base_commit=site.bases["node-t"]),),
+        expected_root_epoch=1,
+        client_op_id="retract-t",
+    )
+    # 重放判据取最晚一条集成提交：第二次集成被回退撤下，须重放回线
+    assert result.preserved == ("node-s",)
+    assert (site.root / "design" / "s2.md").exists()
+    assert (site.root / "design" / "s1.md").exists()
+
+
+async def test_retraction_rejects_scope_with_unparsed_line_changes(tmp_path: Path) -> None:
+    """线上无集成提交但分支带集成路径变更：不按空集成跳过，目标与保留者双拒绝。"""
+    site = _LineageSite(tmp_path)
+    ws_empty = await site.build_empty_integration_scene()
+    # 模拟提交信息解析错位：集成后向作用域分支补一条带集成路径变更的提交
+    (ws_empty / "design" / "extra.md").write_text("extra\n", encoding="utf-8")
+    run_git(["add", "design/extra.md"], ws_empty)
+    run_git(["commit", "-m", "unparsed line change"], ws_empty)
+
+    for client_op_id, targets in (
+        (
+            "retract-unparsed-target",
+            (RetractTarget(scope_id="node-empty", base_commit=site.bases["node-empty"]),),
+        ),
+        (
+            "retract-unparsed-preserver",
+            (
+                RetractTarget(scope_id="node-a", base_commit=site.bases["node-a"]),
+                RetractTarget(scope_id="node-c", base_commit=site.bases["node-c"]),
+            ),
+        ),
+    ):
+        with pytest.raises(WorkspaceManagerError, match="分支带集成路径变更"):
+            await site.manager.retract_integration_line(
+                targets=targets,
+                expected_root_epoch=1,
+                client_op_id=client_op_id,
+            )
