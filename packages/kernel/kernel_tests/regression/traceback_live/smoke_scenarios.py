@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 from pathlib import Path
@@ -346,7 +347,8 @@ async def compat_subagent(
     """弱化档下执行器派 writer 子代理：父会话阻塞到子代理完成，收尾先于结果交付。
 
     弱化档不提供隔离（子代理运行在父工作区），这里如实断言；收尾入口可
-    注入等待，用来证明 CLI 等收尾回调返回后才交付结果。
+    注入等待，用来证明 CLI 等收尾回调返回后才交付结果。子代理自身的调用
+    经同一个父会话进入宿主，不进父作用域的组仲裁。
     """
     started = time.monotonic()
     trace = HostHookTrace()
@@ -384,7 +386,25 @@ async def compat_subagent(
     child_session_map = dispatch_rows[0]["child_session_map"] or {}
     assert child_scope in child_session_map
 
+    # 子代理自身的调用不进父作用域的组仲裁：节点作用域上没有子代理调用建出的组检查点行，
+    # 父作用域的组台账里也没有子代理的工具调用号
     repo = plane.repository(run_id)
+    child_tool_ids = {
+        b["tool_use_id"] for b in trace.barriers if b["agent_id"] or b["parent_tool_use_id"]
+    }
+    assert child_tool_ids, trace.barriers
+    group_tool_ids = {
+        (row["dispatch_anchor"] or {}).get("tool_use_id")
+        for row in node_rows
+        if row["trigger"] == "before_child"
+    }
+    assert not group_tool_ids & child_tool_ids, (group_tool_ids, child_tool_ids)
+    group_id = dispatch_rows[0]["dispatch_anchor"]["dispatch_group_id"]
+    ledger = json.loads(
+        (repo.tree_dir / "dispatch" / f"{group_id}.json").read_text(encoding="utf-8")
+    )
+    assert not child_tool_ids & set(ledger["side_effects"]), (child_tool_ids, ledger)
+
     # 弱化档不提供隔离：子代理直接写进了父工作区，子作用域终态提交里没有它的文件
     assert await repo.blob_content(child_rows[0]["workspace_commit"], "from-child.txt") is None
     node_terminal = next(row for row in node_rows if row["trigger"] == "terminal")
@@ -428,6 +448,7 @@ async def compat_subagent(
     return {
         "scenario": "弱化档子代理",
         "settle_delay_s": settle_delay_s,
+        "child_side_effect_barriers": len(child_tool_ids),
         "elapsed_s": round(time.monotonic() - started, 1),
         "settle_s": round(settle["finished_at"] - settle["started_at"], 2),
         "delivered_after_settle_s": round(delivered_at - settle["finished_at"], 2),

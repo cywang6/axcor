@@ -26,7 +26,7 @@
 | #68 | 已完成 | 本 commit | 对话恢复数据（定位 transcript、截断、种子）整体前移到组检查点 reset 之前：备不好即失败时文件态、代次、后代工作区与旧会话原样未动；两个平面的失败都回收种子目录，回执或报错点名阶段 |
 | #69 | 已完成 | 本 commit | 恢复按集成证据（线上集成提交或本代次已生效的集成操作）重建状态，工作区在盘不再等于活动：保留配置下回退目标可受理、已集成的兄弟按保留者重放；默认配置下已释放的空集成可作回退目标，单会话终态集成后重开可再次收口 |
 | #70 | 已完成 | 本 commit | `scopes` 表落地为作用域状态的事实源：账本行随动作落表，恢复从推断改为读表 + 对操作日志与盘上事实对账；补账按行状态幂等，废弃与释放先落表再移除工作区，活动作用域工作区不在盘显式失败 |
-| #71 | | | |
+| #71 | 已完成 | 本 commit | 子代理自身的副作用屏障按来源标识（父工具调用号或子代理标识）不进父作用域组仲裁：两个平面共用树运行时的放行判定，放行且不落任何检查点；孙代理派发照旧在父作用域仲裁 |
 | #72 | | | |
 | #73 | | | |
 | #74 | | | |
@@ -722,6 +722,65 @@ run 平面 `packages/plugins/graph/tests/test_workspace_run_plane.py`：`test_ge
 - 重启前派发过 writer 子代理的节点，重启后再次 task 派发仍被拒（#63 登记的过渡行为），拒绝原因由「已生效操作不可放弃：dispatch-1（committed）」变成「作用域标识已被占用」——子代理作用域现在进账本。#74 修复后解除。
 - reader 快照建区不经操作日志：「工作区已建、账本行未落」的崩溃窗留下无账的 detached 工作区（#69 已登记，仍成立），归 #74。
 - 单会话终态同步干净后只回收树目录，检查点行与账本行留在表里（检查点行是既有行为，账本行随同一处）；会话删除路径与残留清理器会删。留存行无害，#75 一并考虑。
+
+### #71 [traceback] D6 子代理自身的工具调用被记到父作用域名下（run 平面与单会话同根因）
+
+**根因**
+
+claude SDK 驱动的 `_sdk_pre_tool_cb` 对子代理自身的工具调用同样触发（PreToolUse 从子代理内发出，载荷带 `agent_id`），但屏障一律以 `hooks.session_id`（父会话）发起。两个平面收到后都不看来源：run 平面 `_execute_dispatch_barrier` 按会话归属定位父作用域后直接进组仲裁，单会话 `_execute_barrier` 一律在主写者作用域仲裁。组仲裁按（父作用域，消息标识）判组：子代理调用的消息标识与父不同就另建组——闸门内提交父目录状态、落一行 `before_child` 组检查点；父会话在原回合继续时消息标识又与新建的组不同，再被切成新组，「同 message 后续副作用入组不重建组」失效。即便消息标识相同（子代理的调用入父的组），它的工具调用号也会被记进父组的副作用台账，单 task 组因此不再满足重放前提。
+
+协调器层复现（真实 git，只透传来源字段、不放行）：派发后 `node-a:before_child:node-a-g1`（`toolu-1`）→ 子代理一次 Bash 后多出 `node-a-g2`（`toolu-c1`）→ 父会话同消息的下一次副作用又多出 `node-a-g3`（`toolu-w2`），与问题单的复现一致。单会话平面同款：多出 `sess-1-main:before_child:sess-1-main-g2`。
+
+真实 CLI 下的形态与问题单不同（修复前以一次性探针在离线冒烟的弱化档子代理场景上实测，捆绑 CLI 2.1.327）：子代理工具调用的 `prompt_id` 与父相同，所以不切组、父作用域没有多出组检查点行；它的工具调用号被记进父组的副作用台账。切组形态要在消息标识不同时才出现。另两个实测事实决定了修法：子代理的工具前置钩子带 `agent_id` 与 `agent_type`，`parent_tool_use_id` 恒为空；屏障载荷里的 `native_session_id` 也是父会话的原生标识。
+
+**修复**
+
+- 透传来源：编排器 `_handle_dispatch_barrier` 从屏障载荷取出 `parent_tool_use_id` 与 `agent_id`，经两个平面的端口（`RunCoordinator.submit_dispatch_barrier` 与 `SessionWorkspaceHost.submit_dispatch_barrier` 新增两个仅限关键字参数，缺省为空）进入屏障请求（`DispatchBarrierRequest` 新增两个可选字段，缺省为空，既有调用零变化）。驱动层 `_sdk_pre_tool_cb` 原本就把这两个字段放进载荷，未改。
+- 共用判定：树运行时新增 `WorkspaceTreeRuntime.passes_without_arbitration`——副作用屏障且任一来源字段非空即子代理来源；按 `agent_id` 在派发组检查点行的子会话映射里反查子作用域只为留痕（查到 debug、查不到 info 各一条），返回真。
+- 两个平面据此放行：run 平面 `_execute_dispatch_barrier`（能力门之后、定位父作用域之前）与单会话 `_execute_barrier`（入口）直接返回放行，不进组仲裁、不提交父目录状态、不进父作用域闸门、不落任何检查点行。
+- 子代理来源的 task 派发（孙代理）不走这条，照旧在父作用域仲裁。组仲裁规则未动。
+- 规格 §10.2「屏障内顺序」末尾补一句：子代理自身的工具调用不进父作用域的组仲裁——其写入落在自己的工作区、随组检查点恢复一并废弃，最小恢复粒度是直接子代派发前。
+
+**决策与偏差**
+
+- 偏离裁定的来源判据。裁定写「`parent_tool_use_id` 非空即子代理来源」，落地取「`parent_tool_use_id` 或 `agent_id` 任一非空」。理由：捆绑 CLI 的工具前置钩子只在子代理调用上带 `agent_id`，`parent_tool_use_id` 恒为空（真实 CLI 实测；SDK 类型注释只把 `agent_id` 列为工具生命周期钩子的子代理归属字段，称其为并行子代理下唯一可靠的归属方式；CLI 内嵌代码里 `parent_tool_use_id` 只出现在消息帧上）。只认父工具调用号的话，修复在真实 CLI 上不生效。
+- 放行判定放在能力门之后（两个平面同一顺序）。能力门的拒绝理由针对的是父作用域组仲裁的保证（缺⑤时组检查点无法先于消息内全部副作用），本修复只改子代理来源的屏障如何归属，不改变严格档缺能力时的 fail-closed 行为。
+- 不在子作用域上另做组仲裁（两个可选实现里取简单的那个）：子代理的写入随父作用域的组检查点恢复一并废弃，子代理运行期内部的更细检查点不在规格范围内。
+- 反查不到子作用域时记 info 日志。两个成因（弱化档没有子工作区、子会话映射尚未回填）都是预期内的，放行结果不变。
+- 真实 CLI 冒烟的断言与任务说明不同。说明预期「修复前子代理运行期间父作用域多出组检查点行」，实测该形态在捆绑 CLI 上不出现（子代理调用与父共用 `prompt_id`）。改在既有弱化档子代理场景上断言两点：节点作用域上没有子代理调用建出的组检查点行（两种形态下都成立的不变量）、父组的副作用台账里没有子代理的工具调用号（修复前失败的那一条）。另断言子代理确实带着来源标识发了副作用屏障。
+- 请求里来源字段与 `data` 载荷并存：与既有的 `workspace` 声明同一形态（载荷里带、端口显式传、请求落字段），宿主只认显式字段。
+- 测试夹具（仅测试）：协调器层 `_dispatch_subagent` 增 `child_mapped` 开关（为假时不回填子会话映射）；单会话 `Harness` 增 `side_effect` 与 `group_rows`；离线冒烟的宿主钩子时间线补记两个来源字段。
+- 代码向硬不变量对齐的缺陷修复，规格只补一句澄清，未改 ADR 与实施计划。
+
+**验证**
+
+驱动层 `packages/kernel/kernel_tests/unit/driver/test_dispatch_barrier.py`：`test_sdk_pre_tool_passes_subagent_origin_fields`（参数化两例：Bash、Task）——载荷带 `parent_tool_use_id` / `agent_id` 时屏障回调收到这两个字段；不带时两者为空串，回调结果不变。
+
+编排器接线 `packages/kernel/kernel_tests/session_workspace/test_session_workspace_gate.py::test_driver_shaped_barrier_and_result_hooks_reach_run_port`（补一次调用与断言）——子代理来源经载荷到达 run 平面端口，主会话的调用两个字段为空。
+
+协调器层 `packages/kernel/kernel_tests/unit/run_plane/test_dispatch_barrier_chain.py`（真实 git、`full_capability_runtime`）：
+
+- `test_subagent_side_effect_barrier_stays_out_of_parent_group`（参数化两例：映射已回填且两个字段都带 / 只带 `agent_id` 且映射未回填）：writer 子代理派发后，子代理的两次副作用屏障放行且不带 cwd；父作用域的组检查点行与组恢复点不变；子作用域上没有组检查点行；父组仍是「单 task、无其他副作用」（重放前置校验通过，子代理的调用没记进父组台账）；父会话同消息的下一次副作用放行后组检查点行仍不变。映射未回填的一例有「未反查到子作用域」日志，已回填的一例没有。
+- `test_subagent_task_dispatch_barrier_keeps_existing_path`：带来源字段的 task 派发放行，建出挂在节点作用域下的子工作区。
+
+单会话 `packages/kernel/kernel_tests/session_workspace/test_session_workspace.py::test_subagent_side_effect_barrier_stays_out_of_main_writer_group`：同款一例（映射已回填与未回填的子代理各两次副作用）——主写者作用域上只有派发时建的那一个组检查点行、组恢复点不变，子作用域上没有组检查点行，主会话同消息的下一次副作用仍入原组。
+
+真实 CLI `packages/kernel/kernel_tests/regression/traceback_live/test_offline_smoke.py::test_offline_compat_subagent_is_synchronous_and_settles_before_result`（两例，`--live` 实跑）：既有弱化档子代理场景上加断言——子代理带来源标识发了副作用屏障（证据 `child_side_effect_barriers: 1`），节点作用域上没有子代理调用建出的组检查点行，父组副作用台账里没有子代理的工具调用号。放行时反查命中（debug 日志：`子代理 a16f67b738a7cf7a3 的副作用屏障放行、不进父作用域组仲裁（子作用域 orchestrator-w1-c1）`）。
+
+修复前失败（最终的测试代码对未修复源码；为让用例跑起来先只落透传、不放行）：三个回归用例全部失败于行为。协调器层两例与单会话一例都断在父作用域多出子代理调用建的组检查点行，实得 `Left contains one more item: ('node-a:before_child:node-a-g2', 'toolu-c1', …)` 与 `('sess-1-main:before_child:sess-1-main-g2', 'tool-c1', …)`；一次性探针记下完整过程（派发后 g1 → 子代理一次副作用后 g2 → 父会话同消息再副作用后 g3，见根因；探针跑完即删）。接线用例实得端口收到的来源字段为 `(None, None)`。驱动层用例与孙代理派发用例修复前后都通过（前者是契约固化，后者守住现状）。
+
+变异验证（临时让放行判定恒返回假，只跑对应用例，跑完还原）：离线冒烟弱化档子代理用例失败于父组副作用台账含子代理的工具调用号，实得 `({'toolu_offline_3'}, {'tasks': […], 'side_effects': ['toolu_offline_3', 'toolu_offline_6']})`；协调器层与单会话三个用例同样失败，输出同上。
+
+门禁（最终代码上）：`uv sync` 无变化；`ruff format --check` 430 个文件已格式化、`ruff check` 全过、`lint-imports` 4 条契约保持 0 破坏、`codespell`（全部 git 跟踪的 markdown）无命中；全量 pytest 2894 通过、25 跳过（基线 2888 通过 + 新增 6 例：驱动层参数化 2 例、协调器层 3 例、单会话 1 例），2 条告警为 breather 插件既有告警；`uv build --package workflow-controller-kernel` 与 `--package workflow-controller-plugin-graph` 的 sdist 与 wheel 构建成功（graph 插件源码与测试未改动，因消费内核 SDK 的屏障请求类型一并构建核对）。离线冒烟 `--live` 实跑 7 例通过，约 29 秒。
+
+全量首跑有 1 例失败：`packages/plugins/graph/tests/test_batch_rollback_run_plane.py::test_crash_at_abandoning_phase_recovers_idempotently`。追查确认不是时序抖动，而是账本落表引入的回归（见顺带发现），已在该修订的 commit 修掉；本 commit 的门禁数字取自包含该修订的代码。
+
+**顺带发现**
+
+- `packages/plugins/graph/tests/test_batch_rollback_run_plane.py::test_crash_at_abandoning_phase_recovers_idempotently` 时过时不过（已复现：把该 commit 之前的源码导出到临时目录单独重跑 10 次失败 4 次，工作区 9 次失败 2 次；主 agent 单独重跑 16 次失败 12 次）。批量回滚在废弃相位崩溃（谱系失效计划已落账、切片未落）后恢复，操作置败：`废弃动作失败（u2）: ScopeTreeError: 作用域代次不匹配：u2-w6 expected=1`——恢复后重发的废弃动作带崩溃前的代次，而作用域 `u2-w6` 在崩溃前已经换代。根因是账本落表的回归：此前推断重建丢掉这次换代，重放等于再废弃一次。已在账本落表的验收后修订里修掉（废弃请求的重放按操作号识别、按原结果回执），修后单独重跑 10 次、整个文件 3 次全部通过；本 commit 的门禁数字取自包含该修订的代码。
+- 真实 CLI 下子代理的工具调用与父共用 `prompt_id`（已复现）。子代理的调用因此入父的组而不是切组；按同一机制，子代理发起的 task 派发（孙代理）也入父的组（走读）。组键从回合改为助手消息（#73）之后，子代理调用的消息标识是否与父不同尚未实测；若不同，孙代理派发会把父的组切开——本修复只放行子代理来源的副作用屏障，task 派发按裁定保持现状，#73 需要一并考虑。
+- 屏障载荷的 `native_session_id` 在子代理调用上仍是父会话的原生标识（已复现），组检查点行的锚点无法据此区分父与子；当前靠 `agent_id` 反查子作用域，子代理调用不再落行，暂无功能影响（走读）。
+- 严格档下 claude_sdk 不能派发子代理，子代理来源的屏障目前只在弱化档与全能力假 runtime 上可达；严格档真实 runtime 上的端到端验证仍受 #66 的降级约束。
 
 ## 跳过与延期
 

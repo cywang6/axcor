@@ -393,13 +393,15 @@ def trace_host_hooks(
     settle = orchestrator._handle_subagent_result
 
     async def traced_barrier(session_id: str, data: dict[str, Any], *, kind: str) -> Any:
-        """记下屏障到场的时刻与工具调用号后转交原入口。"""
+        """记下屏障到场的时刻、工具调用号与子代理来源标识后转交原入口。"""
         trace.barriers.append(
             {
                 "at": time.time(),
                 "kind": kind,
                 "tool": data.get("tool_name"),
                 "tool_use_id": data.get("tool_use_id") or "",
+                "agent_id": data.get("agent_id") or "",
+                "parent_tool_use_id": data.get("parent_tool_use_id") or "",
             }
         )
         return await barrier(session_id, data, kind=kind)

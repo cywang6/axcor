@@ -755,6 +755,11 @@ class Orchestrator:
         runtime = ""
         if session is not None:
             runtime = resolve_runtime(session.config.runtime or self.config.runtime)
+        # 子代理来源随载荷透传：宿主据此决定是否进父作用域的组仲裁
+        origin = {
+            "parent_tool_use_id": str(data.get("parent_tool_use_id") or ""),
+            "agent_id": str(data.get("agent_id") or ""),
+        }
         if session is not None and self._session_workspaces.owns(session_id):
             return await self._session_workspaces.submit_dispatch_barrier(
                 session_id,
@@ -762,6 +767,7 @@ class Orchestrator:
                 data,
                 runtime=runtime,
                 workspace=str(data.get("workspace") or "writer"),
+                **origin,
             )
         port = self._dispatch_barrier_port
         if port is None:
@@ -772,6 +778,7 @@ class Orchestrator:
             data,
             runtime=runtime,
             workspace=str(data.get("workspace") or "writer"),
+            **origin,
         )
 
     async def _handle_subagent_result(self, session_id: str, data: dict[str, Any]) -> None:

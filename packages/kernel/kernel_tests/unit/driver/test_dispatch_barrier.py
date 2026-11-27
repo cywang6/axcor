@@ -255,6 +255,37 @@ async def test_sdk_pre_tool_side_effect_barrier_routes() -> None:
     assert is_dispatch_tool("Task") and is_dispatch_tool("Agent")
 
 
+@pytest.mark.parametrize("tool_name", ["Bash", "Task"])
+async def test_sdk_pre_tool_passes_subagent_origin_fields(tool_name: str) -> None:
+    """子代理自身的调用：屏障载荷带父工具调用号与子代理标识；主线程的调用两者为空、行为不变。"""
+    seen: list[tuple[str, str]] = []
+
+    async def barrier(sid: str, data: dict[str, Any]) -> BarrierProceed:
+        seen.append((data["parent_tool_use_id"], data["agent_id"]))
+        return BarrierProceed()
+
+    hooks = _hooks(dispatch=barrier, side_effect=barrier)
+    child_call = await _sdk_pre_tool_cb(
+        {
+            "tool_name": tool_name,
+            "tool_input": {"command": "ls"},
+            "parent_tool_use_id": "toolu-parent",
+            "agent_id": "agent-1",
+        },
+        "toolu-child",
+        None,
+        hooks=hooks,
+    )
+    main_call = await _sdk_pre_tool_cb(
+        {"tool_name": tool_name, "tool_input": {"command": "ls"}},
+        "toolu-main",
+        None,
+        hooks=hooks,
+    )
+    assert child_call == {} and main_call == {}
+    assert seen == [("toolu-parent", "agent-1"), ("", "")]
+
+
 async def test_sdk_pre_tool_reviewer_block_wins_over_injection() -> None:
     """拦截面阻断优先于 cwd 注入（不放行被 reviewer 拒绝的派发）。"""
     hooks = _hooks(

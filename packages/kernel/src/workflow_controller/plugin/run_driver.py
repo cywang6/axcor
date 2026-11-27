@@ -468,6 +468,9 @@ class DispatchBarrierRequest(RunNotification):
     reply: Any = None
     # 子代理工作区声明：writer（默认）| reader（detached 只读快照）
     workspace: str = "writer"
+    # 子代理来源：任一非空即子代理自身的调用（父工具调用号 / 子代理标识），缺省为空
+    parent_tool_use_id: str = ""
+    agent_id: str = ""
 
 
 @dataclass(frozen=True)

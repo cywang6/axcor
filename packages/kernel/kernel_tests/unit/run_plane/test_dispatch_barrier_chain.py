@@ -677,9 +677,14 @@ async def test_unaffiliated_session_passes_through(tmp_path: Path) -> None:
 
 
 async def _dispatch_subagent(
-    h: BridgeHarness, *, runtime: str, workspace: str = "writer", agent_id: str = "agent-1"
+    h: BridgeHarness,
+    *,
+    runtime: str,
+    workspace: str = "writer",
+    agent_id: str = "agent-1",
+    child_mapped: bool = True,
 ) -> str:
-    """派发一个 writer/reader 子代理并回填子会话映射，返回子工作区路径。"""
+    """派发一个 writer/reader 子代理，返回子工作区路径；child_mapped 为真时回填子会话映射。"""
     outcome = await h.coord.submit_dispatch_barrier(
         "ses-exec",
         "dispatch",
@@ -688,9 +693,10 @@ async def _dispatch_subagent(
         workspace=workspace,
     )
     assert isinstance(outcome, BarrierProceed) and outcome.child_cwd
-    await h.coord.record_subagent_start(
-        "ses-exec", {"agent_id": agent_id, "parent_tool_use_id": "toolu-1"}
-    )
+    if child_mapped:
+        await h.coord.record_subagent_start(
+            "ses-exec", {"agent_id": agent_id, "parent_tool_use_id": "toolu-1"}
+        )
     return outcome.child_cwd
 
 
@@ -841,5 +847,118 @@ async def test_subagent_completion_wait_window_closes_with_fault(
         assert events[0]["agent_id"] == "agent-1"
         assert "超窗" in events[0]["error"]
         assert Path(child_cwd).is_dir()
+    finally:
+        await _finish_run(h)
+
+
+# ── 子代理自身的调用：不进父作用域组仲裁 ──────────────────────────────
+
+
+async def _group_rows_of(h: BridgeHarness, scope_id: str) -> list[tuple[str, str, str]]:
+    """作用域上的组检查点行：（行标识，工具调用号，组恢复点）。"""
+    return [
+        (r["checkpoint_id"], r["dispatch_anchor"]["tool_use_id"], r["workspace_commit"])
+        for r in await h.coord.list_run_checkpoints(h.run_id)
+        if r["scope_id"] == scope_id and r["trigger"] == "before_child"
+    ]
+
+
+async def _child_side_effect(
+    h: BridgeHarness, runtime: str, tool_use_id: str, **origin: str
+) -> BarrierProceed | BarrierDeny:
+    """子代理在自己的回合里发一次副作用屏障（带来源标识）。"""
+    return await h.coord.submit_dispatch_barrier(
+        "ses-exec",
+        "side_effect",
+        {"tool_name": "Bash", "tool_use_id": tool_use_id, "prompt_id": "child-turn-9"},
+        runtime=runtime,
+        **origin,
+    )
+
+
+@pytest.mark.parametrize(
+    ("origin", "child_mapped"),
+    [
+        ({"parent_tool_use_id": "toolu-1", "agent_id": "agent-1"}, True),
+        # 捆绑 CLI 的工具前置钩子只带 agent_id、不带父工具调用号；映射未回填时反查不到
+        ({"agent_id": "agent-1"}, False),
+    ],
+    ids=["mapped", "unmapped-agent-id-only"],
+)
+async def test_subagent_side_effect_barrier_stays_out_of_parent_group(
+    tmp_path: Path,
+    full_capability_runtime: str,
+    caplog: pytest.LogCaptureFixture,
+    origin: dict[str, str],
+    child_mapped: bool,
+) -> None:
+    """writer 子代理自身的副作用屏障放行，不进父作用域组仲裁；父会话同消息的后续副作用仍入原组。
+
+    按子会话映射反查子作用域只为留痕：映射未回填时同样放行、同样不落行，并留一条日志。
+    """
+    h = await _setup_run(tmp_path)
+    try:
+        child_cwd = await _dispatch_subagent(
+            h, runtime=full_capability_runtime, child_mapped=child_mapped
+        )
+        (Path(child_cwd) / "design" / "from-child.md").write_text("child\n", encoding="utf-8")
+        group_before = await _group_rows_of(h, "node-a")
+        assert len(group_before) == 1  # 派发时建的组
+
+        with caplog.at_level(
+            logging.INFO, logger="workflow_controller.core.workspace.tree_runtime"
+        ):
+            for tool_use_id in ("toolu-c1", "toolu-c2"):
+                outcome = await _child_side_effect(
+                    h, full_capability_runtime, tool_use_id, **origin
+                )
+                assert isinstance(outcome, BarrierProceed) and outcome.child_cwd is None
+
+        # 父作用域的组检查点行与组恢复点都没动
+        assert await _group_rows_of(h, "node-a") == group_before
+        assert ("未反查到子作用域" in caplog.text) is (not child_mapped)
+        # 子作用域上也不落组检查点行
+        checkpoints = CheckpointStore(h.store.db_path)
+        child_rows = await checkpoints.list_for_scope("node-a-c1")
+        checkpoints.close()
+        assert child_rows == []
+        # 子代理的调用没有记进父作用域的组台账：组仍是「单 task、无其他副作用」
+        await h.coord.validate_dispatch_replay(h.run_id, group_before[0][0])
+
+        # 父会话在同一消息内的下一次副作用仍入原组：不另建组，组恢复点不动
+        parent_call = await h.coord.submit_dispatch_barrier(
+            "ses-exec",
+            "side_effect",
+            {"tool_name": "Bash", "tool_use_id": "toolu-w2", "prompt_id": "msg-1"},
+            runtime=full_capability_runtime,
+        )
+        assert isinstance(parent_call, BarrierProceed)
+        assert await _group_rows_of(h, "node-a") == group_before
+    finally:
+        await _finish_run(h)
+
+
+async def test_subagent_task_dispatch_barrier_keeps_existing_path(
+    tmp_path: Path, full_capability_runtime: str
+) -> None:
+    """子代理发起的 task 派发（孙代理）：带来源字段照旧在父作用域仲裁并建出子工作区，不因字段被拒。"""
+    h = await _setup_run(tmp_path)
+    try:
+        await _dispatch_subagent(h, runtime=full_capability_runtime)
+        outcome = await h.coord.submit_dispatch_barrier(
+            "ses-exec",
+            "dispatch",
+            {"tool_name": "Task", "tool_use_id": "toolu-2", "prompt_id": "child-turn-9"},
+            runtime=full_capability_runtime,
+            parent_tool_use_id="toolu-1",
+            agent_id="agent-1",
+        )
+        assert isinstance(outcome, BarrierProceed) and outcome.child_cwd
+        child_parents = [
+            s["parent_scope_id"]
+            for s in await h.coord.list_run_scopes(h.run_id)
+            if s["scope_kind"] == "subagent"
+        ]
+        assert child_parents == ["node-a", "node-a"]
     finally:
         await _finish_run(h)

@@ -18,8 +18,8 @@
 账本、作用域账本存储与组仲裁装配为一件可执行单元；首个工作区动作惰
 性建立，重开或崩溃后的既有仓经深度恢复从账本表重建账本（对不上账
 显式失败）。本模块自 run 协调器抽出，供会话宿主侧等价装配（树 id 与
-根作用域标识不同），并承载两平面共用的生命周期检查点落账与子代理结
-果收尾链。
+根作用域标识不同），并承载两平面共用的生命周期检查点落账、子代理结
+果收尾链与子代理自身副作用的放行判定。
 """
 
 from __future__ import annotations
@@ -344,6 +344,33 @@ class WorkspaceTreeRuntime:
     async def child_scope_for_session(self, native_child_session_id: str) -> str | None:
         """按子会话原生标识反查树内的子代理作用域；映射未回填返回 None。"""
         return await self.checkpoints.find_child_scope(self.root_scope_id, native_child_session_id)
+
+    async def passes_without_arbitration(
+        self, *, kind: str, parent_tool_use_id: str, agent_id: str
+    ) -> bool:
+        """子代理自身的副作用屏障是否不进组仲裁、直接放行。
+
+        父工具调用号或子代理标识任一非空即子代理来源（捆绑 CLI 的工具前置
+        钩子只带后者）。子代理写的是自己的工作区，写入随父作用域的组检查点
+        恢复一并废弃，不在任何作用域上另落组检查点。按子会话映射反查子作用域
+        只为留痕：查不到（弱化档没有子工作区，或映射尚未回填）同样放行。
+        task 派发不算：孙代理派发照旧进父作用域的组仲裁。
+        """
+        if kind != "side_effect" or not (parent_tool_use_id or agent_id):
+            return False
+        child_scope_id = await self.child_scope_for_session(agent_id)
+        if child_scope_id is None:
+            logger.info(
+                "子代理 %s 的副作用屏障放行、不落检查点：未反查到子作用域（弱化档没有子工作区，或子会话映射尚未回填）",
+                agent_id,
+            )
+        else:
+            logger.debug(
+                "子代理 %s 的副作用屏障放行、不进父作用域组仲裁（子作用域 %s）",
+                agent_id,
+                child_scope_id,
+            )
+        return True
 
     async def settle_subagent_scope(
         self, scope_id: str, *, orchestration_state_ref: str

@@ -1561,6 +1561,8 @@ class RunCoordinator:
         *,
         runtime: str = "",
         workspace: str = "writer",
+        parent_tool_use_id: str = "",
+        agent_id: str = "",
     ) -> BarrierOutcome:
         """派发屏障入口：会话宿主发起，经 FIFO 在 run 任务内执行核心动作。
 
@@ -1568,6 +1570,7 @@ class RunCoordinator:
         语义收口为拒绝，不让 hook 挂死。盘上没有树配置的 run（未开启工作
         区隔离）直接放行——不注入 cwd、不建组，与既有路径零差异；树只在
         盘上的 run（重启或重开之后）照常入队，由 run 任务重建树后执行。
+        parent_tool_use_id 与 agent_id 标识子代理来源，缺省为空即父会话自身的调用。
         """
         affiliation = self._affiliation.resolve(session_id)
         if affiliation is None:
@@ -1598,6 +1601,8 @@ class RunCoordinator:
                 data=dict(data),
                 reply=reply,
                 workspace=workspace,
+                parent_tool_use_id=parent_tool_use_id,
+                agent_id=agent_id,
             ),
         )
         try:
@@ -2453,7 +2458,7 @@ class RunCoordinator:
     async def _execute_dispatch_barrier(
         self, rt: RunRuntime, req: DispatchBarrierRequest
     ) -> BarrierOutcome:
-        """执行屏障核心动作链：能力门 → 编排状态先持久化 → 组仲裁 → 回 cwd/放行。
+        """执行屏障核心动作链：能力门 → 子代理自身的副作用直接放行 → 编排状态先持久化 → 组仲裁 → 回 cwd/放行。
 
         屏障内一切 I/O 由本方法（宿主侧）执行，hook 不直写核心；编排状态
         版本先于文件提交（与生命周期检查点同一持久化顺序）。树不在内存
@@ -2470,6 +2475,11 @@ class RunCoordinator:
             block = group_arbitration_block_reason(caps, strict=strict)
         if block is not None:
             return BarrierDeny(reason=block)
+        if await tree.passes_without_arbitration(
+            kind=req.kind, parent_tool_use_id=req.parent_tool_use_id, agent_id=req.agent_id
+        ):
+            # 子代理自身的副作用：写的是子代理自己的工作区，不进父作用域的组仲裁
+            return BarrierProceed()
         parent_scope = await self._barrier_parent_scope(tree, req)
         child: ChildDispatchRequest | None = None
         preallocated = ""

@@ -523,8 +523,13 @@ class SessionWorkspaceHost:
         *,
         runtime: str = "",
         workspace: str = "writer",
+        parent_tool_use_id: str = "",
+        agent_id: str = "",
     ) -> BarrierOutcome:
-        """会话宿主侧屏障入口：组仲裁建检查点，task 场景建子工作区回 cwd。"""
+        """会话宿主侧屏障入口：组仲裁建检查点，task 场景建子工作区回 cwd。
+
+        parent_tool_use_id 与 agent_id 标识子代理来源，缺省为空即主会话自身的调用。
+        """
         entry = self._resolve(session_id)
         if entry is None:
             return BarrierProceed()  # 无树：照旧放行（与 run 平面同语义）
@@ -544,7 +549,15 @@ class SessionWorkspaceHost:
         lock = self._barrier_locks.setdefault(entry.session_id, asyncio.Lock())
         async with lock:
             try:
-                return await self._execute_barrier(entry, session_id, kind, data, workspace)
+                return await self._execute_barrier(
+                    entry,
+                    session_id,
+                    kind,
+                    data,
+                    workspace,
+                    parent_tool_use_id=parent_tool_use_id,
+                    agent_id=agent_id,
+                )
             except Exception as e:
                 # 屏障失败显式拒绝（不抛进驱动的工具回调），本次副作用不执行
                 return BarrierDeny(reason=f"{type(e).__name__}: {e}")
@@ -556,9 +569,17 @@ class SessionWorkspaceHost:
         kind: str,
         data: dict[str, Any],
         workspace: str,
+        *,
+        parent_tool_use_id: str,
+        agent_id: str,
     ) -> BarrierOutcome:
-        """屏障核心动作链：账本先落 → 组仲裁 → 回 cwd/放行。"""
+        """屏障核心动作链：子代理自身的副作用直接放行 → 账本先落 → 组仲裁 → 回 cwd/放行。"""
         tree = entry.tree
+        if await tree.passes_without_arbitration(
+            kind=kind, parent_tool_use_id=parent_tool_use_id, agent_id=agent_id
+        ):
+            # 子代理自身的副作用：写的是子代理自己的工作区，不进主写者作用域的组仲裁
+            return BarrierProceed()
         parent = await tree.manager.get_scope(tree.main_writer_scope_id)
         if parent is None or parent.state is not ScopeState.ACTIVE:
             return BarrierDeny(reason=f"会话主写者作用域不可用，屏障拒绝：{session_id}")

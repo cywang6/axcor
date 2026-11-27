@@ -155,6 +155,24 @@ class Harness:
             runtime=runtime,
         )
 
+    async def side_effect(
+        self, session_id: str, runtime: str, tool_use_id: str, message: str, **origin: str
+    ) -> Any:
+        """提交一次 Bash 副作用屏障（origin 可带子代理来源标识），返回屏障结论。"""
+        return await self.host.submit_dispatch_barrier(
+            session_id,
+            "side_effect",
+            {
+                "prompt_id": message,
+                "tool_use_id": tool_use_id,
+                "native_session_id": "native-1",
+                "tool_name": "Bash",
+                "tool_input": {"command": "true"},
+            },
+            runtime=runtime,
+            **origin,
+        )
+
     async def group_checkpoint_row(self, session_id: str) -> dict[str, Any]:
         """取会话树里当前的组检查点行。"""
         rows = await self.host.list_checkpoints(session_id)
@@ -164,6 +182,14 @@ class Harness:
             if r["trigger"] == "before_child"
             and (r["dispatch_anchor"] or {}).get("dispatch_group_id")
         )
+
+    async def group_rows(self, session_id: str) -> list[tuple[str, str, str]]:
+        """主写者作用域上的组检查点行：（行标识，工具调用号，组恢复点）。"""
+        return [
+            (r["checkpoint_id"], r["dispatch_anchor"]["tool_use_id"], r["workspace_commit"])
+            for r in await self.host.list_checkpoints(session_id)
+            if r["trigger"] == "before_child" and r["scope_id"] == f"{session_id}-main"
+        ]
 
     def plant_transcript(self, native_session_id: str, rows: list[dict[str, Any]]) -> None:
         """铺父会话 transcript 源（回滚链的截断输入）。"""
@@ -443,6 +469,51 @@ async def test_subagent_completion_integrates_into_main_writer(tmp_path, full_ca
     report = await h.host.finalize_session("sess-1")
     assert not report.refused
     assert (h.original / "design" / "from-child.md").read_text(encoding="utf-8") == "child\n"
+
+
+async def test_subagent_side_effect_barrier_stays_out_of_main_writer_group(
+    tmp_path, full_capability_runtime
+):
+    """子代理自身的副作用屏障放行：主写者作用域上不因子代理的调用多出组检查点行。
+
+    主会话在同一消息内的下一次副作用仍入原组；子会话映射查不到时同样放行、不落行。
+    """
+    from workflow_controller.driver.hooks import BarrierProceed
+
+    h = Harness(tmp_path)
+    await h.migrate()
+    session = h.add_session("sess-1")
+    await h.host.prepare_session(session)
+    assert isinstance(await h.writer_dispatch("sess-1", full_capability_runtime), BarrierProceed)
+    await h.host.record_subagent_start(
+        "sess-1", {"parent_tool_use_id": "tool-1", "agent_id": "child-native-1"}
+    )
+    group_before = await h.group_rows("sess-1")
+    assert len(group_before) == 1  # 派发时建的组
+
+    # 子代理在自己的回合里做副作用：子会话映射已回填的与未回填的各两次
+    for agent_id in ("child-native-1", "child-native-unmapped"):
+        for tool_use_id in ("tool-c1", "tool-c2"):
+            outcome = await h.side_effect(
+                "sess-1",
+                full_capability_runtime,
+                tool_use_id,
+                "child-turn",
+                parent_tool_use_id="tool-1",
+                agent_id=agent_id,
+            )
+            assert isinstance(outcome, BarrierProceed) and outcome.child_cwd is None
+
+    assert await h.group_rows("sess-1") == group_before
+    checkpoints = CheckpointStore(h.db_path)
+    child_rows = await checkpoints.list_for_scope("sess-1-main-c1")
+    checkpoints.close()
+    assert child_rows == []  # 子作用域上也不落组检查点行
+
+    # 主会话在同一消息内的下一次副作用仍入原组：不另建组，组恢复点不动
+    parent_call = await h.side_effect("sess-1", full_capability_runtime, "tool-2", "p1")
+    assert isinstance(parent_call, BarrierProceed)
+    assert await h.group_rows("sess-1") == group_before
 
 
 async def test_strict_barrier_denies_opencode_writer(tmp_path):

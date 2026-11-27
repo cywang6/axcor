@@ -109,14 +109,16 @@ async def test_traceback_run_member_gate_off(tmp_path, base_config):
 
 
 async def test_driver_shaped_barrier_and_result_hooks_reach_run_port(tmp_path, base_config):
-    """驱动按位置传参调用屏障与结果回调：请求带着类别、工具与工作区声明到达 run 平面端口并放行。"""
+    """驱动按位置传参调用屏障与结果回调：请求带着类别、工具、工作区声明与子代理来源到达 run 平面端口并放行。"""
     orch = Orchestrator(base_config, default_project_dir=tmp_path / "gate.db")
     try:
         barrier_calls: list[tuple[str, str, object]] = []
+        origins: list[tuple[str | None, str | None]] = []
         agent_ids: list[str] = []
 
         async def barrier_port(session_id: str, kind: str, data: dict, **kwargs) -> BarrierProceed:
             barrier_calls.append((kind, data["tool_name"], kwargs.get("workspace")))
+            origins.append((kwargs.get("parent_tool_use_id"), kwargs.get("agent_id")))
             return BarrierProceed(child_cwd="/ws/child" if kind == "dispatch" else None)
 
         async def result_port(session_id: str, data: dict) -> None:
@@ -132,14 +134,26 @@ async def test_driver_shaped_barrier_and_result_hooks_reach_run_port(tmp_path, b
             {"tool_name": "Task", "tool_input": {"prompt": "work"}, "workspace": "reader"},
         )
         side_effect = await hooks.before_side_effect_tool(session.id, {"tool_name": "Write"})
+        child_call = await hooks.before_side_effect_tool(
+            session.id,
+            {
+                "tool_name": "Bash",
+                "parent_tool_use_id": "toolu-parent",
+                "agent_id": "agent-1",
+            },
+        )
         await hooks.before_subagent_result(session.id, {"agent_id": "agent-1"})
 
         assert isinstance(dispatch, BarrierProceed) and dispatch.child_cwd == "/ws/child"
         assert isinstance(side_effect, BarrierProceed) and side_effect.child_cwd is None
+        assert isinstance(child_call, BarrierProceed)
         assert barrier_calls == [
             ("dispatch", "Task", "reader"),
             ("side_effect", "Write", "writer"),
+            ("side_effect", "Bash", "writer"),
         ]
+        # 子代理来源随载荷到达端口：主会话的调用两个字段都为空
+        assert origins == [("", ""), ("", ""), ("toolu-parent", "agent-1")]
         assert agent_ids == ["agent-1"]
     finally:
         await orch.shutdown()
