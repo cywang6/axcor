@@ -20,13 +20,16 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import pytest
+
 from workflow_controller.core.workspace.actions import (
+    AbandonScope,
     ScopeIntegrated,
     ScopeIntegrationRejected,
 )
 from workflow_controller.core.workspace.manifest import RebuildScript, WorkspaceManifest
 from workflow_controller.core.workspace.oplog import OPLOG_FILENAME
-from workflow_controller.core.workspace.scope_tree import ScopeKind, ScopeState
+from workflow_controller.core.workspace.scope_tree import ScopeKind, ScopeState, ScopeTreeError
 
 from ._support import FakeOrchestrator, build_workspace, run_git
 
@@ -242,6 +245,28 @@ async def test_abandon_releases_workspace_and_rebuild_uses_latest_head(tmp_path:
     integrated = await orchestrator.integrate("node-gone")
     assert isinstance(integrated, ScopeIntegrated)
     assert (root / "design" / "retry.md").read_text(encoding="utf-8") == "retry\n"
+
+
+async def test_abandon_replay_after_crash_returns_original_receipt(tmp_path: Path) -> None:
+    """同一废弃请求重放（崩溃前已换代、回执未达）按原结果回执、不重复换代；他者先废弃仍按代次拒绝。"""
+    _root, _repository, manager = build_workspace(tmp_path)
+    orchestrator = FakeOrchestrator(manager)
+    await orchestrator.bootstrap_root()
+    await orchestrator.prepare("node-a")
+    await orchestrator.prepare("node-a-c1", parent_scope_id="node-a", scope_kind=ScopeKind.SUBAGENT)
+
+    request = AbandonScope(scope_id="node-a", expected_scope_epoch=1, client_op_id="rb-abandon-1")
+    first = await manager.abandon_scope(request)
+
+    assert await manager.abandon_scope(request) == first
+    assert first.new_scope_epoch == 2
+    assert first.abandoned_descendants == (("node-a-c1", 2),)
+    assert (await manager.get_scope("node-a-c1")).scope_epoch == 2
+    # 操作号不同即他者先行废弃：同一旧代次的请求照旧拒绝
+    with pytest.raises(ScopeTreeError, match="作用域代次不匹配"):
+        await manager.abandon_scope(
+            AbandonScope(scope_id="node-a", expected_scope_epoch=1, client_op_id="rb-abandon-2")
+        )
 
 
 async def test_scope_key_with_colon_round_trips_prepare_and_rebuild(tmp_path: Path) -> None:

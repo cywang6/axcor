@@ -1850,7 +1850,8 @@ class GraphDriver:
                 AbandonScope(
                     scope_id=stale[0],
                     expected_scope_epoch=stale[1],
-                    client_op_id=f"abandon-{self._workspace_seq}",
+                    # 操作号按作用域与代次定死：崩溃后重发的是同一请求，核心按它识别重放
+                    client_op_id=f"abandon-{stale[0]}-e{stale[1]}",
                     context=f"node={node_id}",
                 )
             )

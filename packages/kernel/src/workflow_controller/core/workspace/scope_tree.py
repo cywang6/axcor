@@ -109,6 +109,8 @@ class ScopeRecord:
     gate_state: ScopeGateState
     state: ScopeState
     created_at: str
+    # 最近一次废弃该作用域的操作号：同一请求重放时核心按它识别
+    abandon_op_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -354,12 +356,16 @@ class ScopeTree:
         )
 
     async def abandon_scope(
-        self, scope_id: str, *, expected_scope_epoch: int
+        self,
+        scope_id: str,
+        *,
+        expected_scope_epoch: int,
+        abandon_op_id: str | None = None,
     ) -> list[AbandonedScope]:
         """废弃作用域及其全部后代：各自换代一次，旧代次回执随之全部失效。
 
         账面先落表、工作区随后才移除：行已是废弃即换代事实，崩溃留下的
-        工作区由恢复按账回收。
+        工作区由恢复按账回收。发起废弃的操作号随行落表。
         """
         target = await self.require_scope_epoch(scope_id, expected_scope_epoch)
         abandoned = [
@@ -378,6 +384,7 @@ class ScopeTree:
                 scope_epoch=item.new_scope_epoch,
                 state=ScopeState.DISCARDED,
                 gate_state=ScopeGateState.RUNNING,
+                abandon_op_id=abandon_op_id,
             )
         await self._persist(*(item.scope_id for item in abandoned))
         return abandoned

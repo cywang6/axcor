@@ -666,6 +666,7 @@ run 平面 `packages/plugins/graph/tests/test_workspace_run_plane.py`：`test_ge
 - 根行缺席按「建树未完成」显式失败，不做迁移与推断回落（按裁定）。实际命中面：全新建树在树配置落盘后、根行落表前崩溃；分支未发布、没有存量数据。
 - 已释放不再在重启后收敛成已集成（#69 当时沿用推断的口径）：表里记的是 `released` 就还原 `released`。既有用例里相应断言由已集成改为已释放。
 - 「建区已写、账本行未落」维持 #67 的决策，只收口操作不补行；废弃后同键重建在同一窗口崩溃时表里停在已废弃，同样不补——编排层重发建区即可（Graph 换新键，单会话宿主清理半成品）。
+- 验收后修订（主 agent，另立 commit）：废弃请求的重放按原结果回执。账本落表之后，崩溃落在「废弃已换代落表、回执未达」窗口时，编排层重启后带着崩溃前的预期代次重发同一废弃动作，账上的代次已是预期加一，被「作用域代次不匹配」拒绝，批量回滚在废弃相位崩溃的用例因此失败（单独重跑 16 次失败 12 次）。修复前同一窗口能通过，是因为推断重建从检查点行取代次、丢掉了这次换代，重放等于再废弃一次。废弃不经操作日志、没有按操作号的幂等缓存：账本表增 `abandon_op_id` 列（最近一次废弃该作用域的操作号，随目标行落表；v7 尚未发布，直接改该档 DDL，不另立一档），管理器按它识别重放——目标已被同一操作号废弃在预期代次的下一代，按原结果回执（后代取已废弃的当前代次），不再换代。不能只按行状态放行：他者回滚链先行废弃时，本链带旧代次的废弃按规格须判为逻辑失败（操作置败、迟到回执照常落账），`test_late_abandon_receipt_after_failure_still_falls_slice` 守着这条，只按状态放行时它 6 次全失败。引擎在节点起步清理旧作用域时发出的废弃，操作号原为每次递增的序号，崩溃后重发就不是同一请求；改为按作用域与代次定死（`abandon-<作用域>-e<代次>`），建区键的序号不变。
 - 闸门状态迁移不落表（验收修订：初版每次迁移落表，按验收意见改掉）：受闸操作每个走三次迁移（静止中 → 已静止 → 运行），副作用屏障、检查点、集成、恢复都因此多三次写库；恢复时闸门状态又一律归 `running`，这些写入没有读取方。行里的闸门状态列只是最近一次因其它字段变化落表时的值（例如闸门内 `set_state` 把已静止带了进去）。崩溃留下的非运行值重建时归 `running` 并写回表，否则恢复后的第一个闸门动作会撞「非法闸门状态迁移」。
 - 存储的可选装配落在 `ScopeTree` 一层：直接使用账本或管理器的调用方（测试的假编排）不装配即只在内存维护，行为不变；两棵生产树都经 `WorkspaceTreeRuntime` 装配，恒有存储。
 - 恢复先对操作日志、再核盘上事实：核对可能改动行（补账、后代废弃），盘上核验要拿对账后的账去比。
@@ -710,6 +711,8 @@ run 平面 `packages/plugins/graph/tests/test_workspace_run_plane.py`：`test_ge
 变异验证（临时改一处源码、只跑对应用例、跑完还原，共十处，全部被守住）：恢复不补账面后果 → `test_recovery_reconciles_integration_against_parent_ref` 实得 `awaiting_integration`；账本不落表 → `test_rows_follow_manager_actions`、`test_recovery_reloads_every_scope_unchanged` 失败；废弃或释放回到「先物理后账面」→ `test_recovery_prunes_workspace_left_after_ledger_write` 对应例失败；回退补账幂等退回按异常代次判定 → `test_recovery_completes_retract_after_partial_invalidation_crash` 失败；恢复不核根行、不核盘上事实、不回收残留工作区、不回填 reader 登记、不归零闸门状态 → 各自对应用例失败。
 
 另跑离线冒烟 `packages/kernel/kernel_tests/regression/traceback_live/test_offline_smoke.py`（`--live`，真实捆绑 CLI 加脚本化模型）7 例通过，含进程强杀后的冷恢复复用会话。
+
+验收后修订的验证：`packages/kernel/kernel_tests/workspace/test_workspace_orchestration.py::test_abandon_replay_after_crash_returns_original_receipt`——同一废弃请求重放，回执与首次一致，目标与后代的代次停在 2；操作号不同的同代次请求照旧抛代次不匹配。修复前重放抛 `ScopeTreeError: 作用域代次不匹配：node-a expected=1`。`packages/plugins/graph/tests/driver/test_engine_workspace.py::test_retry_abandons_stale_scope_before_rebuild` 补断言：起步清理的废弃操作号按作用域与代次定死。run 平面 `packages/plugins/graph/tests/test_batch_rollback_run_plane.py`：`test_crash_at_abandoning_phase_recovers_idempotently` 单独重跑 20 次全部通过（修复前 16 次失败 12 次）；`test_late_abandon_receipt_after_failure_still_falls_slice` 守「他者先行废弃按代次拒绝」，结论不变。
 
 门禁（最终代码上）：`ruff format --check` 430 个文件已格式化、`ruff check` 全过、`lint-imports` 4 条契约保持 0 破坏、`codespell`（全部 git 跟踪的 markdown）无命中；全量 pytest 2887 通过、25 跳过（基线 2873 通过 + 新增 14 例），2 条告警为 breather 插件既有告警；`uv build --package workflow-controller-kernel` 与 `--package workflow-controller-plugin-graph` 的 sdist 与 wheel 构建成功（graph 插件源码未改动，因测试有改动一并构建核对）。
 

@@ -64,6 +64,7 @@ class TestSchemaMigration:
                 "gate_state",
                 "state",
                 "owner_ref",
+                "abandon_op_id",
                 "created_at",
                 "seq",
             ]

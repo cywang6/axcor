@@ -392,6 +392,8 @@ def test_retry_abandons_stale_scope_before_rebuild(tmp_path: Path) -> None:
     assert len(abandons) == 1
     assert abandons[0].scope_id == "a-w1"
     assert abandons[0].expected_scope_epoch == 1
+    # 操作号按作用域与代次定死：崩溃后重发的是同一请求，核心按它识别重放
+    assert abandons[0].client_op_id == "abandon-a-w1-e1"
     assert not pick(actions, PrepareScopeWorkspace)  # 废弃回执前不建新
 
     actions = decide(driver, (abandoned_note("node=a"),))  # type: ignore[arg-type]

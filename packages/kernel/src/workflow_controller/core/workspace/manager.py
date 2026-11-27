@@ -62,6 +62,7 @@ from workflow_controller.core.workspace.oplog import (
 from workflow_controller.core.workspace.repository import ROOT_INTEGRATION_REF, ROOT_SEED_REF
 from workflow_controller.core.workspace.scope_tree import (
     INITIAL_EPOCH,
+    AbandonedScope,
     ScopeGateState,
     ScopeKind,
     ScopeState,
@@ -78,7 +79,7 @@ if TYPE_CHECKING:
         ScopeWorkspace,
         WorkspaceRepository,
     )
-    from workflow_controller.core.workspace.scope_tree import AbandonedScope, ScopeRecord, ScopeTree
+    from workflow_controller.core.workspace.scope_tree import ScopeRecord, ScopeTree
 
 __all__ = [
     "RetractTarget",
@@ -783,12 +784,29 @@ class WorkspaceManager:
         return commit, branch
 
     async def abandon_scope(self, request: AbandonScope) -> ScopeAbandoned:
-        """废弃作用域及后代：先移除各自工作区，再账面各自换代一次。"""
+        """废弃作用域及后代：账面各自换代一次并落表，随后移除工作区。
+
+        目标已被同一操作号废弃在预期代次的下一代，说明同一请求在崩溃前
+        已经换代、回执未达：按原结果回执，不再换代。操作号不同即他者先行
+        废弃，照旧按代次不符拒绝。
+        """
         target = await self._require_scope(request.scope_id)
         if target.scope_kind is ScopeKind.ROOT:
             raise WorkspaceManagerError("根作用域不可废弃")
-        abandoned = await self._abandon_scope_physically(
-            await self._tree.require_scope_epoch(request.scope_id, request.expected_scope_epoch)
+        replayed = (
+            target.state is ScopeState.DISCARDED
+            and target.abandon_op_id == request.client_op_id
+            and target.scope_epoch == request.expected_scope_epoch + 1
+        )
+        abandoned = (
+            await self._replayed_abandonment(target)
+            if replayed
+            else await self._abandon_scope_physically(
+                await self._tree.require_scope_epoch(
+                    request.scope_id, request.expected_scope_epoch
+                ),
+                abandon_op_id=request.client_op_id,
+            )
         )
         return ScopeAbandoned(
             scope_id=request.scope_id,
@@ -798,10 +816,22 @@ class WorkspaceManager:
             ),
         )
 
-    async def _abandon_scope_physically(self, target: ScopeRecord) -> list[AbandonedScope]:
+    async def _replayed_abandonment(self, target: ScopeRecord) -> list[AbandonedScope]:
+        """废弃请求重放的回执素材：目标与已废弃的后代各取当前代次。"""
+        abandoned = [AbandonedScope(scope_id=target.scope_id, new_scope_epoch=target.scope_epoch)]
+        abandoned.extend(
+            AbandonedScope(scope_id=record.scope_id, new_scope_epoch=record.scope_epoch)
+            for record in await self._tree.list_descendants(target.scope_id)
+            if record.state is ScopeState.DISCARDED
+        )
+        return abandoned
+
+    async def _abandon_scope_physically(
+        self, target: ScopeRecord, *, abandon_op_id: str | None = None
+    ) -> list[AbandonedScope]:
         """账面各自换代一次并落表，随后才移除目标及后代工作区。"""
         abandoned = await self._tree.abandon_scope(
-            target.scope_id, expected_scope_epoch=target.scope_epoch
+            target.scope_id, expected_scope_epoch=target.scope_epoch, abandon_op_id=abandon_op_id
         )
         for item in abandoned:
             self._claims.release(item.scope_id)

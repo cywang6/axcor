@@ -57,6 +57,7 @@ SCOPES_DDL = """
         gate_state             TEXT NOT NULL,
         state                  TEXT NOT NULL,
         owner_ref              TEXT,
+        abandon_op_id          TEXT,
         created_at             TEXT NOT NULL,
         seq                    INTEGER NOT NULL,
         PRIMARY KEY (root_scope_id, scope_id)
@@ -80,6 +81,7 @@ _COLUMN_NAMES = (
     "gate_state",
     "state",
     "owner_ref",
+    "abandon_op_id",
     "created_at",
 )
 _COLUMNS = ", ".join(_COLUMN_NAMES)
@@ -107,6 +109,7 @@ def _row_to_record(row: sqlite3.Row) -> ScopeRecord:
         gate_state=ScopeGateState(row["gate_state"]),
         state=ScopeState(row["state"]),
         created_at=row["created_at"],
+        abandon_op_id=row["abandon_op_id"],
     )
 
 
@@ -124,6 +127,7 @@ def _named(record: ScopeRecord) -> dict[str, object]:
         "gate_state": record.gate_state.value,
         "state": record.state.value,
         "owner_ref": record.owner_ref,
+        "abandon_op_id": record.abandon_op_id,
         "created_at": record.created_at,
     }
 
