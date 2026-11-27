@@ -17,12 +17,12 @@ reviewer 判的是 worker「想结束本轮 / 弹了 AskUserQuestion」时该不
 - **AUQ 判定 = 纯叙述判断**（不读磁盘）：reviewer 为 worker 弹的每个问题选一个能让任务
   推进得最远的选项，规则核心是"忽略 worker 标的 (推荐) / 风险 / 安全 措辞"。
 
-## Fixture 清单（13 个，领域中性）
+## Fixture 清单（14 个，领域中性）
 
 所有 fixture 都是领域无关的通用软件 / 文档场景（保留被测的决策逻辑与 partial 信号）。
 算子领域专属 case 以后走 per-plugin 补。通用 fixture 按执行顺序从 01 连续编号。
 
-### STOP（7 个）
+### STOP（8 个）
 
 | ID | 被测决策逻辑 | 期望 |
 |---|---|---|
@@ -33,6 +33,7 @@ reviewer 判的是 worker「想结束本轮 / 弹了 AskUserQuestion」时该不
 | 11 | gate 类：worker 中途请审批（"回复 继续 / 通过"）→ feedback 极简"继续"，不展开缺失清单 | block |
 | 12 | 正向：技术调研文档任务，0 partial 信号，刻意脱离多阶段交付结构 → 放行（证明 let_exit 不绑领域） | let_exit |
 | 13 | 外部设备占用阻塞必需项（G2 门禁验证未执行），产物已落盘 → 保留未完成事实并阻断退出 | block |
+| 14 | 使用原始 reviewer goal 和完整末条回复回放，六条路径及报告均存在，末条回复仅汇报产物存在性 → 阻断退出 | block |
 
 ### AUQ（6 个）
 
@@ -78,7 +79,7 @@ reviewer 走 `AnthropicHttpDriver`（裸 HTTP 单次调用、temp=0、无 agent 
 1. 在 `fixtures/` 加 `NN_<kind>_<short>.yaml`（`kind` = `stop_hook` / `auq`）。
 2. 字段：`name` / `kind` / `description`（写清被测的决策逻辑）/ `worker_context`（stop）
    或 `auq_questions`（auq）/ `staged_disk` / `expected`。
-   `staged_disk` 可用路径列表生成通用文件和目录，或用「相对路径 → 正文」映射提供具体文件内容。
+   `staged_disk` 接受路径列表，为各路径准备通用文件或目录。也可使用「相对路径 → 正文或非负字节数」映射，指定文件正文或大小。
    用例自述提到可核对的章节或交付内容时，应提供与自述一致的正文，以免模拟文件的体量或内容影响判定。
 3. `expected`：STOP 用 `action` + `feedback_must_include` / `feedback_must_not_include`；
    AUQ 用 `action`（恒 block）+ `auq_must_select_one_of` / `auq_must_not_select`。
