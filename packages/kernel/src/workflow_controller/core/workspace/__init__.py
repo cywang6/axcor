@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""工作区作用域树：私有仓、作用域账本、写入闸门与三阶段操作日志。"""
+"""工作区作用域树：私有仓、作用域账本（内存账本与落表存储）、写入闸门与三阶段操作日志。"""
 
 from workflow_controller.core.workspace.actions import (
     AbandonScope,
@@ -88,6 +88,7 @@ from workflow_controller.core.workspace.repository import (
     WorkspaceRepository,
     WorkspaceRepositoryError,
 )
+from workflow_controller.core.workspace.scope_ledger import ScopeLedgerStore
 from workflow_controller.core.workspace.scope_tree import (
     INITIAL_EPOCH,
     AbandonedScope,
@@ -148,6 +149,7 @@ __all__ = [
     "ScopeIntegrated",
     "ScopeIntegrationRejected",
     "ScopeKind",
+    "ScopeLedgerStore",
     "ScopeQuiesceFailedError",
     "ScopeRecord",
     "ScopeRestored",

@@ -30,6 +30,7 @@ from workflow_controller.core.workspace.residue_reaper import (
     FORK_TEMPDIR_PREFIX,
     WorkspaceResidueReaper,
 )
+from workflow_controller.core.workspace.scope_ledger import ScopeLedgerStore
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -71,7 +72,7 @@ def _plant_tree(original: Path, sid: str) -> Path:
 
 
 async def _plant_tree_rows(db_path: Path, sid: str) -> None:
-    """给残留树落检查点行（根 + 主写者 + 子代理三层）。"""
+    """给残留树落检查点行（根 + 主写者 + 子代理三层）与作用域账本行（根 + 主写者）。"""
     import sqlite3
 
     from workflow_controller.core.checkpoints import (
@@ -81,6 +82,7 @@ async def _plant_tree_rows(db_path: Path, sid: str) -> None:
         ScopeCheckpoint,
         ScopeKind,
     )
+    from workflow_controller.core.workspace.scope_ledger import SCOPES_DDL
 
     con = sqlite3.connect(db_path)
     con.execute(SCOPE_CHECKPOINTS_DDL)
@@ -88,6 +90,20 @@ async def _plant_tree_rows(db_path: Path, sid: str) -> None:
         "CREATE INDEX IF NOT EXISTS idx_scope_checkpoints_scope"
         " ON scope_checkpoints (scope_id, created_at)"
     )
+    con.execute(SCOPES_DDL)
+    for seq, (scope_id, parent, kind) in enumerate(
+        [
+            (f"{sid}-root", None, "root"),
+            (f"{sid}-main", f"{sid}-root", "main_writer"),
+        ],
+        start=1,
+    ):
+        con.execute(
+            "INSERT INTO scopes (root_scope_id, scope_id, parent_scope_id, scope_kind,"
+            " scope_epoch, root_epoch, gate_state, state, created_at, seq)"
+            " VALUES (?, ?, ?, ?, 1, 1, 'running', 'active', '2026-11-20T10:00:00+00:00', ?)",
+            (f"{sid}-root", scope_id, parent, kind, seq),
+        )
     con.commit()
     con.close()
     store = CheckpointStore(db_path)
@@ -156,7 +172,7 @@ def _reaper(
 
 
 async def test_reaps_crash_residual_tree_and_rows(tmp_path: Path) -> None:
-    """会话已消失 + 树超 TTL → 整树回收 + 三层检查点行删除。"""
+    """会话已消失 + 树超 TTL → 整树回收 + 三层检查点行与作用域账本行删除。"""
     original = tmp_path / "proj"
     original.mkdir()
     sid = uuid.uuid4().hex
@@ -174,6 +190,9 @@ async def test_reaps_crash_residual_tree_and_rows(tmp_path: Path) -> None:
     store = CheckpointStore(tmp_path / "events.db")
     assert await store.list_for_tree(f"{sid}-root") == []
     store.close()
+    ledger = ScopeLedgerStore(tmp_path / "events.db", root_scope_id=f"{sid}-root")
+    assert await ledger.list_for_tree() == []
+    ledger.close()
 
 
 async def test_keeps_live_session_tree(tmp_path: Path) -> None:

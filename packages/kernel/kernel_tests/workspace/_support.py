@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import subprocess
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from workflow_controller.core.workspace.actions import (
@@ -33,7 +34,7 @@ from workflow_controller.core.workspace.manager import WorkspaceManager
 from workflow_controller.core.workspace.manifest import WorkspaceManifest
 from workflow_controller.core.workspace.oplog import SagaOplog
 from workflow_controller.core.workspace.repository import WorkspaceRepository
-from workflow_controller.core.workspace.scope_tree import ScopeKind, ScopeTree
+from workflow_controller.core.workspace.scope_tree import ScopeGateState, ScopeKind, ScopeTree
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -66,6 +67,11 @@ def make_user_root(root: Path) -> None:
     (root / "op" / "build" / "artifact.bin").write_bytes(b"\x00\x01artifact")
 
 
+def at_rest(record: ScopeRecord) -> ScopeRecord:
+    """闸门迁移不落表，行里的闸门状态只是最近一次其它字段落表时的值：比较时按稳态（运行）看。"""
+    return replace(record, gate_state=ScopeGateState.RUNNING)
+
+
 def build_workspace(
     tmp_path: Path,
     *,
@@ -73,15 +79,16 @@ def build_workspace(
     conflict_policy: ConflictPolicy = ConflictPolicy.GIT_MERGE,
     tree_id: str = "run-1",
     claims_enforce: bool = False,
+    scope_tree: ScopeTree | None = None,
 ) -> tuple[Path, WorkspaceRepository, WorkspaceManager]:
-    """装配根目录、私有仓与工作区管理器，不初始化根作用域。"""
+    """装配根目录、私有仓与工作区管理器，不初始化根作用域；账本缺省只在内存维护。"""
     root = tmp_path / "root"
     root.mkdir()
     make_user_root(root)
     repository = WorkspaceRepository(root, tree_id)
     manager = WorkspaceManager(
         repository=repository,
-        scope_tree=ScopeTree(),
+        scope_tree=scope_tree if scope_tree is not None else ScopeTree(),
         oplog=SagaOplog(repository.tree_dir),
         manifest=manifest if manifest is not None else WorkspaceManifest(),
         integration_coordinator=IntegrationCoordinator(repository, conflict_policy=conflict_policy),
@@ -110,6 +117,7 @@ class FakeOrchestrator:
         parent_scope_id: str | None = None,
         scope_kind: ScopeKind = ScopeKind.MAIN_WRITER,
         claims: tuple[str, ...] = (),
+        owner_ref: str | None = None,
     ) -> ScopeWorkspacePrepared:
         """派发建区动作并回传通知。"""
         self._operation_seq += 1
@@ -117,7 +125,7 @@ class FakeOrchestrator:
             PrepareScopeWorkspace(
                 parent_scope_id=parent_scope_id or self.root_scope_id,
                 scope_key=scope_key,
-                spec=ScopeWorkspaceSpec(scope_kind=scope_kind, claims=claims),
+                spec=ScopeWorkspaceSpec(scope_kind=scope_kind, owner_ref=owner_ref, claims=claims),
                 client_op_id=f"fake-prepare-{self._operation_seq}",
             )
         )

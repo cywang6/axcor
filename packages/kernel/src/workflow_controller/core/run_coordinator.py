@@ -2111,7 +2111,7 @@ class RunCoordinator:
             self._stop_marked.discard(run_id)
         tree = self._workspace_trees.pop(run_id, None)
         if tree is not None:
-            tree.checkpoints.close()  # 释放检查点账本连接（磁盘产物留给 GC）
+            tree.close()  # 释放账本连接（磁盘产物留给 GC）
         for key in [k for k in self._dispatch_admissions if k[0] == run_id]:
             self._dispatch_admissions.pop(key, None)
         if not task.cancelled() and task.exception() is not None:
@@ -2848,7 +2848,7 @@ class RunCoordinator:
             await tree.initialize()
             if self._runtimes.get(rt.run_id) is not rt:
                 # 建树期间运行时已被替换或退出（查询面触发时可能）：树无人清理，不登记
-                tree.checkpoints.close()
+                tree.close()
                 return None
             self._workspace_trees[rt.run_id] = tree
             return tree

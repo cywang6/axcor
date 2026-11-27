@@ -17,8 +17,10 @@
 核心只认识作用域：集成根、主写者、子代理三类节点构成一棵树。每个作用域
 携带两层代次——自身代次（废弃或重建时递增，旧代次回执一律拒绝）与建区
 时的集成线代次（集成线回退后，基于旧基线的请求拒绝）；生命周期状态、
-闸门状态与不透明编排引用随行记录。本账本只在内存维护，持久化由检查点
-账本另行接管。
+闸门状态与不透明编排引用随行记录。装配了账本存储时，行的每次变化随动
+作落表：根行随建树落表，作用域行在首次转为活动时写入（建区中不落表），
+废弃换代与组检查点恢复的多行变化同一事务。闸门状态是进程内瞬态，迁移
+只在内存维护、不落表。
 """
 
 from __future__ import annotations
@@ -30,6 +32,8 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from workflow_controller.core.workspace.scope_ledger import ScopeLedgerStore
 
 __all__ = [
     "INITIAL_EPOCH",
@@ -91,7 +95,7 @@ class ScopeGateState(StrEnum):
 
 @dataclass(frozen=True)
 class ScopeRecord:
-    """作用域账本行：字段与落库列一一对应。"""
+    """作用域账本行：字段与账本表列一一对应（树根标识与建区序号由存储维护）。"""
 
     scope_id: str
     parent_scope_id: str | None
@@ -152,11 +156,12 @@ def _require_valid_parenting(parent: ScopeRecord, child_kind: ScopeKind) -> None
 class ScopeTree:
     """一棵作用域树的内存账本。"""
 
-    def __init__(self) -> None:
-        """空账本：建立根作用域后成树。"""
+    def __init__(self, store: ScopeLedgerStore | None = None) -> None:
+        """空账本：建立根作用域后成树；给定存储时行随动作落表。"""
         self._scopes: dict[str, ScopeRecord] = {}
         self._children: dict[str, list[str]] = {}
         self._root_scope_id: str | None = None
+        self._store = store
 
     @property
     def current_root_epoch(self) -> int:
@@ -197,13 +202,14 @@ class ScopeTree:
         )
         self._scopes[scope_id] = record
         self._root_scope_id = scope_id
+        await self._persist(scope_id)
         return record
 
     async def load_records(self, records: Sequence[ScopeRecord]) -> None:
         """崩溃恢复的整账装载：替换全部行并重建父子索引。
 
         只接受恰好一个根作用域的行集；父子引用须闭合（父在集合内或
-        为根），否则对不上账、显式失败。
+        为根），否则对不上账、显式失败。装载不落表。
         """
         if self._root_scope_id is not None or self._scopes:
             raise ScopeTreeError("账本非空，不能整账装载")
@@ -237,7 +243,10 @@ class ScopeTree:
         workspace_ref: str | None = None,
         scope_base_commit: str | None = None,
     ) -> ScopeRecord:
-        """建子作用域：出生为建区中，登记建区时的父集成头并继承树根代次。"""
+        """建子作用域：出生为建区中，登记建区时的父集成头并继承树根代次。
+
+        建区中不落表：工作区建成、转为活动时行才首次写入。
+        """
         self._require_unused_id(scope_id)
         if not isinstance(scope_kind, ScopeKind):
             raise ScopeTreeError("scope_kind 必须是作用域种类枚举")
@@ -299,21 +308,25 @@ class ScopeTree:
     async def activate_scope(
         self, scope_id: str, *, workspace_ref: str, scope_base_commit: str
     ) -> ScopeRecord:
-        """建区成功转活动：登记工作区引用与文件恢复基线。"""
+        """建区成功转活动：登记工作区引用与文件恢复基线，行随动作落表。"""
         self._require_transition(scope_id, ScopeState.ACTIVE)
-        return self._mutate(
+        record = self._mutate(
             scope_id,
             state=ScopeState.ACTIVE,
             workspace_ref=workspace_ref,
             scope_base_commit=scope_base_commit,
         )
+        await self._persist(scope_id)
+        return record
 
     async def set_state(self, scope_id: str, new_state: ScopeState) -> ScopeRecord:
         """按生命周期表迁移状态；废弃换代与重建走专门方法，不经此入口。"""
         if not isinstance(new_state, ScopeState):
             raise ScopeTreeError("new_state 必须是作用域状态枚举")
         self._require_transition(scope_id, new_state)
-        return self._mutate(scope_id, state=new_state)
+        record = self._mutate(scope_id, state=new_state)
+        await self._persist(scope_id)
+        return record
 
     async def begin_attempt(
         self,
@@ -323,7 +336,10 @@ class ScopeTree:
         scope_base_commit: str,
         integration_base_commit: str,
     ) -> ScopeRecord:
-        """废弃作用域在新基线重建：回建区中，根代次取当前值（基线重新有效）。"""
+        """废弃作用域在新基线重建：回建区中，根代次取当前值（基线重新有效）。
+
+        建区中不落表：表里的行保持已废弃，工作区建成、转为活动时才更新。
+        """
         record = self._require(scope_id)
         if record.state is not ScopeState.DISCARDED:
             raise ScopeTreeError(f"只有已废弃作用域能重建：{scope_id}（{record.state.value}）")
@@ -340,7 +356,11 @@ class ScopeTree:
     async def abandon_scope(
         self, scope_id: str, *, expected_scope_epoch: int
     ) -> list[AbandonedScope]:
-        """废弃作用域及其全部后代：各自换代一次，旧代次回执随之全部失效。"""
+        """废弃作用域及其全部后代：各自换代一次，旧代次回执随之全部失效。
+
+        账面先落表、工作区随后才移除：行已是废弃即换代事实，崩溃留下的
+        工作区由恢复按账回收。
+        """
         target = await self.require_scope_epoch(scope_id, expected_scope_epoch)
         abandoned = [
             AbandonedScope(scope_id=target.scope_id, new_scope_epoch=target.scope_epoch + 1)
@@ -359,12 +379,13 @@ class ScopeTree:
                 state=ScopeState.DISCARDED,
                 gate_state=ScopeGateState.RUNNING,
             )
+        await self._persist(*(item.scope_id for item in abandoned))
         return abandoned
 
     async def restore_scope(
         self, scope_id: str, *, expected_scope_epoch: int
     ) -> tuple[AbandonedScope, list[AbandonedScope]]:
-        """组检查点恢复的账面步：目标换代但保持活动，后代废弃换代。"""
+        """组检查点恢复的账面步：目标换代但保持活动，后代废弃换代（同一事务）。"""
         target = await self.require_scope_epoch(scope_id, expected_scope_epoch)
         restored = AbandonedScope(scope_id=target.scope_id, new_scope_epoch=target.scope_epoch + 1)
         abandoned: list[AbandonedScope] = []
@@ -383,6 +404,7 @@ class ScopeTree:
                 gate_state=ScopeGateState.RUNNING,
             )
         self._mutate(target.scope_id, scope_epoch=restored.new_scope_epoch)
+        await self._persist(target.scope_id, *(item.scope_id for item in abandoned))
         return restored, abandoned
 
     async def advance_root_epoch(self, *, expected_root_epoch: int) -> int:
@@ -395,6 +417,7 @@ class ScopeTree:
             )
         new_epoch = root.root_epoch + 1
         self._mutate(root.scope_id, root_epoch=new_epoch)
+        await self._persist(root.scope_id)
         return new_epoch
 
     async def require_scope_epoch(self, scope_id: str, expected_scope_epoch: int) -> ScopeRecord:
@@ -427,7 +450,11 @@ class ScopeTree:
             )
 
     async def set_gate_state(self, scope_id: str, gate_state: ScopeGateState) -> ScopeRecord:
-        """登记闸门状态：只接受账本三值环，静止失败瞬态不落账本。"""
+        """登记闸门状态：只接受账本三值环，静止失败瞬态不落账本。
+
+        闸门迁移不落表（与建区中同一处理）：恢复时一律归运行，落表没有
+        读取方；行里的闸门状态只是最近一次因其它字段变化落表时的值。
+        """
         if not isinstance(gate_state, ScopeGateState):
             raise ScopeTreeError("gate_state 必须是账本闸门状态枚举")
         record = self._require(scope_id)
@@ -436,6 +463,11 @@ class ScopeTree:
                 f"非法闸门状态迁移：{record.gate_state.value} → {gate_state.value}（{scope_id}）"
             )
         return self._mutate(scope_id, gate_state=gate_state)
+
+    async def _persist(self, *scope_ids: str) -> None:
+        """把若干作用域行的当前值落表（同一事务）；未装配存储时只在内存维护。"""
+        if self._store is not None:
+            await self._store.upsert([self._scopes[scope_id] for scope_id in scope_ids])
 
     def _require(self, scope_id: str) -> ScopeRecord:
         """取作用域行；不存在即报错。"""

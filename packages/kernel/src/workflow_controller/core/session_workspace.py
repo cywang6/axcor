@@ -434,14 +434,15 @@ class SessionWorkspaceHost:
             writer = await tree.manager.get_scope(tree.main_writer_scope_id)
             if writer is None:
                 if tree.main_writer_workspace_dir.exists():
-                    # 崩溃窗残留的半成品建区（无检查点行无账）：清理后重建
+                    # 崩溃窗残留的半成品建区（工作区已建、账本行未落）：清理后重建
                     await tree.repository.prune_scope_residue(
                         tree.main_writer_workspace_dir,
                         tree.main_writer_scope_id,
                     )
                 await self._prepare_main_writer(entry, session)
-            elif writer.state is not ScopeState.ACTIVE:
-                # 崩溃窗残留（已集成/已释放/冲突）：废弃换代后按当前头重建
+            elif writer.state is not ScopeState.ACTIVE or await self._scope_start_missing(tree):
+                # 崩溃窗残留：已集成/已释放/冲突，或建区已落账而 scope_start 行未落
+                # ——废弃换代后按当前头重建
                 await tree.manager.abandon_scope(
                     AbandonScope(
                         scope_id=tree.main_writer_scope_id,
@@ -453,12 +454,17 @@ class SessionWorkspaceHost:
             await self._point_session_cwd(session, entry)
         except BaseException:
             self._entries.pop(sid, None)
-            tree.checkpoints.close()
+            tree.close()
             if fresh:
                 # 半成品新树整目录回收；既有树（恢复失败）保留待查
                 await asyncio.to_thread(shutil.rmtree, tree.tree_dir, ignore_errors=True)
             raise
         return entry
+
+    async def _scope_start_missing(self, tree: SessionWorkspaceTree) -> bool:
+        """主写者名下没有任何 scope_start 检查点行（建区已落账、检查点行未落）。"""
+        rows = await tree.checkpoints.list_for_scope(tree.main_writer_scope_id)
+        return not any(row.trigger is CheckpointTrigger.SCOPE_START for row in rows)
 
     async def _prepare_main_writer(self, entry: _SessionTreeEntry, session: Any) -> None:
         """建主写者作用域：会话账本先落账，再建区并落 scope_start 检查点。"""
@@ -703,7 +709,7 @@ class SessionWorkspaceHost:
             )
         else:
             entry.state = "synced"
-            tree.checkpoints.close()
+            tree.close()
             await asyncio.to_thread(shutil.rmtree, tree.tree_dir, ignore_errors=True)
         return report
 
@@ -749,19 +755,21 @@ class SessionWorkspaceHost:
     async def cleanup_session(self, session_id: str) -> None:
         """会话删除路径的整树回收（对已同步树为幂等空操作）。
 
-        检查点行随树一并删除——会话既已删除，行不再有查询面（重放/回滚
-        均以会话在场为前提），留存只会成为账面孤儿。
+        检查点行与作用域账本行随树一并删除——会话既已删除，行不再有查询
+        面（重放/回滚/重建均以会话在场为前提），留存只会成为账面孤儿。
         """
         owner = self._aliases.pop(session_id, session_id)
         entry = self._entries.pop(owner, None)
         self._barrier_locks.pop(owner, None)
         if entry is None:
             return
+        root_scope_id = entry.tree.root_scope_id
         try:
-            await entry.tree.checkpoints.delete_for_tree(entry.tree.root_scope_id)
+            await entry.tree.checkpoints.delete_for_tree(root_scope_id)
+            await entry.tree.ledger.delete_for_tree()
         except Exception:
-            logger.warning("会话 %s 删除时检查点行清理失败（不阻塞树回收）", session_id[:12])
-        entry.tree.checkpoints.close()
+            logger.warning("会话 %s 删除时账本行清理失败（不阻塞树回收）", session_id[:12])
+        entry.tree.close()
         await asyncio.to_thread(shutil.rmtree, entry.tree.tree_dir, ignore_errors=True)
 
     # ── 子代理回滚（宿主自任编排确认方） ──────────────────────

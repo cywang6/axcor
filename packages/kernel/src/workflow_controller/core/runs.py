@@ -57,6 +57,7 @@ from workflow_controller.core.status_maps import (
     TERMINAL_STATUSES,
     validate_kind_format,
 )
+from workflow_controller.core.workspace.scope_ledger import SCOPES_DDL
 from workflow_controller.store.event_store import (
     EVENTS_DDL,
     IDX_EVENTS_RUN_DDL,
@@ -108,8 +109,9 @@ def _coerce_enum(value: str, enum_cls: type[StrEnum]) -> str:
 # v3 = 驱动状态两表（最新快照 + append-only 历史）；
 # v4 = run_driver_state 增终态投影列（/state 降级读源）；
 # v5 = 作用域检查点账本表（与遗留插件的旧检查点表并存，互不相扰）；
-# v6 = watchdog 节点累计时钟账本表（节点超时规则的重启保留面）。
-SCHEMA_VERSION = 6
+# v6 = watchdog 节点累计时钟账本表（节点超时规则的重启保留面）；
+# v7 = 作用域账本表（作用域状态的事实源，树运行时崩溃后据此重建）。
+SCHEMA_VERSION = 7
 
 # 档位特征列：判定库 schema 是否齐备（幂等位探针）。
 _V1_RUNS_FEATURES = ("kind", "work_dir", "reopened_at")
@@ -118,6 +120,7 @@ _V3_TABLES = ("run_driver_state", "run_driver_snapshots")
 _V4_RDS_FEATURES = ("projection",)
 _V5_TABLES = ("scope_checkpoints",)
 _V6_TABLES = ("watchdog_node_clocks",)
+_V7_TABLES = ("scopes",)
 # v2 撤销的预算两列（run 级预算不实现）
 _RETIRED_RUNS_COLUMNS = ("max_budget_usd", "spent_usd")
 _V1_SESSIONS_ADDITIONS = (
@@ -364,6 +367,7 @@ class RunStore:
         v4_ok = set(_V4_RDS_FEATURES) <= _table_columns(conn, "run_driver_state")
         v5_ok = set(_V5_TABLES) <= tables
         v6_ok = set(_V6_TABLES) <= tables
+        v7_ok = set(_V7_TABLES) <= tables
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         return (
             runs_ok
@@ -374,6 +378,7 @@ class RunStore:
             and v4_ok
             and v5_ok
             and v6_ok
+            and v7_ok
             and version >= SCHEMA_VERSION
         )
 
@@ -698,6 +703,7 @@ class RunStore:
             conn.execute(IDX_SCOPE_CHECKPOINTS_SCOPE_DDL)
             conn.execute(WATCHDOG_NODE_CLOCKS_DDL)
             conn.execute(IDX_WATCHDOG_NODE_CLOCKS_RUN_DDL)
+            conn.execute(SCOPES_DDL)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.execute("COMMIT")
         except BaseException:

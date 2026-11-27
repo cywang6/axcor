@@ -4,7 +4,7 @@ title: "traceback 工作区隔离与统一回滚技术规格（git worktree 写�
 status: Frozen
 owner: "chenyangwang"
 created: 2026-11-23
-updated: 2026-11-26
+updated: 2026-11-27
 related_adrs:
   - docs/adr/0001-worktree-scope-tree-unified-rollback.md
 related_specs:
@@ -219,7 +219,8 @@ Graph 映射（住在 graph 插件内）：executor 出生 → `PrepareScopeWork
 
 | 模块 | 路径 | 职责 | 来源 |
 |---|---|---|---|
-| ScopeTree | `core/workspace/scope_tree.py` 新增 | 作用域树账本（两层 epoch、闸门状态、不透明编排引用） | 新写 |
+| ScopeTree | `core/workspace/scope_tree.py` 新增 | 作用域树账本（两层 epoch、闸门状态、不透明编排引用）；行随动作落表（§7），存储可选装配 | 新写 |
+| ScopeLedgerStore | `core/workspace/scope_ledger.py` 新增 | 作用域账本表 `scopes` 的读写面：按树绑定、多行同一事务、按建区序号读出；建表归 RunStore 统一迁移，本模块只读写不建表 | 新写 |
 | WorkspaceManager | `core/workspace/manager.py` 新增 | worktree 生命周期编排、物化、GC（git 调用经 Repository，不直接拼 git 命令） | 新写 |
 | Gate | `core/workspace/gate.py` 新增 | 闸门状态机 | 新写 |
 | Repository | `core/workspace/repository.py` 新增 | 私有仓、基线导入、首层物化与 `scope_base_commit`；**git 子进程出口之一**（仓布局/worktree/提交/refs/核验） | 自 SnapshotEngine 提炼 |
@@ -410,26 +411,35 @@ CREATE TABLE IF NOT EXISTS scope_checkpoints (
 - 严格模式可选强化 `one_side_effect_per_message`（默认关闭，强制执行同样依赖 ⑤）。
 - 兼容读取：无组信息的旧检查点按「组 = 该 message」处理。
 
-`scopes` 表：
+`scopes` 表（作用域账本，schema 经 RunStore 统一迁移管理，与 `scope_checkpoints` 同库）：
 
 ```sql
 CREATE TABLE IF NOT EXISTS scopes (
-    scope_id      TEXT PRIMARY KEY,
+    root_scope_id TEXT NOT NULL,          -- 所属树的根作用域标识
+    scope_id      TEXT NOT NULL,
     parent_scope_id TEXT,
     scope_kind    TEXT NOT NULL,          -- root | main_writer | subagent
-    workspace_ref TEXT,                   -- worktree 路径 + 分支 ref
+    workspace_ref TEXT,                   -- 工作区路径|分支 ref；根检出与 reader 快照无分支段
     scope_base_commit TEXT,               -- 文件恢复 / 子作用域建区继承
     integration_base_commit TEXT,         -- 集成 diff / 路径集冲突检测 / 根 reset 目标；
-                                         --   子代理场景 = 其 child_base_commit
+                                          --   子代理场景 = 其 child_base_commit
     scope_epoch   INTEGER NOT NULL,       -- 作用域代次（回退/废弃递增）
     root_epoch    INTEGER NOT NULL,       -- 建区时集成线 epoch（判断基线是否失效）
     gate_state    TEXT NOT NULL,          -- running | quiescing | quiesced
     state         TEXT NOT NULL,          -- preparing/active/awaiting_integration/
                                         -- integrated/conflicted/discarded/released
     owner_ref     TEXT,                   -- 不透明：编排层执行单元标识
-    created_at    TEXT NOT NULL
+    created_at    TEXT NOT NULL,
+    seq           INTEGER NOT NULL,       -- 建区序号：树内单调递增
+    PRIMARY KEY (root_scope_id, scope_id)
 );
 ```
+
+- **主键取（根作用域标识, 作用域标识）**：Graph 平面的作用域键不含 run 标识，同一库内多个 run 的同名节点靠树根区分；一棵树的全部行以根作用域标识锚定。
+- **`seq` 保证遍历序**：`created_at` 的时间精度不足以定序；行首次落表时分配建区序号，同键换代重建不改变序号。重建后的遍历序（根最先、子作用域按建区序）与重建前一致。
+- **账本行是作用域状态的事实源**：状态、两层代次、工作区引用、双基线与属主一律以行为准，不从检查点行或盘上事实推断。根行随建树落表，先于树运行时对外可用；新建树前清掉同根的残留行。作用域行在其首次转为 `active` 时写入，`preparing` 不落表（废弃后同键重建的行保持 `discarded` 直到重新 `active`）。闸门状态是进程内瞬态，闸门迁移不落表；重建时一律归 `running`（崩溃的进程没有持有中的闸门）。
+- **落表时机**：账本行的每次变化都随动作落表，动作成功返回前受影响的行已在表里；一次动作涉及多行（废弃或恢复的目标与后代）时同一事务。写序两类：只改状态的操作（废弃、释放、转待集成）先落表，其中带工作区移除的（废弃、释放）落表之后才移除工作区；含 git 写的多步操作（建区、集成、组检查点恢复、集成线回退）按 §11 经操作日志记账，账面后果在 git 写落定之后、操作收口之前落表。直接使用账本或管理器时存储可选装配，未装配即只在内存维护；生产接线（Graph run 与单会话两棵树）必须装配。表未建（库未经统一迁移）时账本显式失败。
+- **恢复读表并对账**：重建读出该树的全部行（含子代理作用域），再对操作日志与盘上事实对账（§11）。检查点行仍是检查点标识、派发锚点、子会话映射、恢复点与 claims 的来源。
 
 `scope_epoch` 标识「这个作用域的第几代实例」，旧回执按 `(scope_id, scope_epoch)` 拒绝；`root_epoch` 只在集成线回退时递增，拒绝基于失效基线的集成与回滚请求。回滚请求的 `expected_epoch` 按操作对象取对应层。
 
@@ -772,6 +782,23 @@ PREPARED(expected_old_head)          # 意图落盘：精确旧头、两层 epoc
 | 其他任意值（含 HEAD 已前进到后续合法提交） | **停止自动恢复并报告分叉**——回退会删除后续合法成果，禁止 |
 
 各操作的步骤链与恢复要点：建区（有意图无 scope → 清理半成品）；检查点（==new head → 补行；未记 new head → 判据核验；否则检查点不存在）；集成（同三态判据）；集成线回退（须同时精确匹配 root head 与 epoch 且目标通过 §9.2 校验才补账）；会话替换（绑定匹配 → 补齐，否则废弃该 session）。操作 id = `client_op_id`，全链路透传。
+
+**作用域账本对账**（工作区树运行时缺席时的重建）：
+
+1. **读表**：从 `scopes` 表读出该树的全部行（§7）装入账本——状态、两层代次、工作区引用、双基线与属主取自行，根代次取自根行；闸门状态归 `running`。
+2. **对操作日志**：挂起操作按上表三态在其所在的引用上核对（建区的新头在新作用域分支、集成在父作用域引用、恢复在作用域自己的分支、集成线回退在集成线），分叉即停。核对通过（操作已生效）后把操作的账面后果补到行上，再收口操作：
+
+   | 操作 | 账面后果 |
+   |---|---|
+   | 建区 | 只收口操作，不补行：半成品作用域不进账本，由编排层重发建区 |
+   | 集成 | 该作用域转 `integrated` |
+   | 组检查点恢复 | 目标作用域代次 +1 并保持 `active`，其后代各自废弃换代 |
+   | 集成线回退 | 根代次 +1（线未动则不推进），失效作用域各自废弃换代 |
+
+   意图未生效的操作直接放弃，行不动。补账幂等：行已是后果形态时跳过。
+3. **对盘上事实**：`active` 与 `awaiting_integration` 的作用域，工作区目录与分支必须在，不在即作用域损坏，显式失败、不做推断回落；`integrated`、`released`、`discarded`、`conflicted` 的行，工作区在不在盘都不改状态，其中 `released` 与 `discarded` 的行若工作区仍在盘（账面已落、工作区移除未完成的崩溃窗口），按账移除工作区、分支保留。
+
+表里没有该树的根行而盘上有树配置，按建树未完成显式失败，报错说明原因；不迁移、不推断。检查点行不在此重建，仍由检查点账本承载：claims 从检查点行的声明列复登记；活动派发组是进程内状态，不恢复，恢复后的首个副作用开新组。
 
 ## 12. Agent 自行执行 Git 命令的约束
 

@@ -12,24 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""深度恢复：树运行时崩溃重建的最小对账。
+"""深度恢复：工作区树运行时崩溃后的重建与对账。
 
-重开或崩溃后工作区树运行时（内存账本）缺席——本模块基于检查点账
-（scope_checkpoints 行）与私有仓 refs 重建作用域账本：两层代次按行
-取最新、状态按「工作区在盘 / 分支进过集成线 / 其余已废弃」推断（集
-成本身已生效的作用域不因工作区仍在盘而判为活动）、claims 从行内声
-明列重建、属主从操作日志的建区意图回填。随后对操作
-日志做三态核对：意图未生效可放弃、已写只补账（集成线回退的引用推进
-幂等重做）、对不上账显式失败（分叉即停，绝不自动回退）。每条操作按
-其种类与阶段在所在的引用上核对。做不到全量恢复的边角在报告中显式
-降级，不静默。
+重开或崩溃后工作区树运行时（内存账本）缺席——本模块从作用域账本表读
+出该树的全部行装入账本：状态、两层代次、工作区引用、双基线与属主一律
+以行为准，闸门状态归运行（崩溃的进程没有持有中的闸门）。随后对操作日
+志做三态核对：意图未生效可放弃、已写只补账、对不上账显式失败（分叉即
+停，绝不自动回退）；核对通过的操作把账面后果补到行上。最后对盘上事
+实：活动与待集成作用域的工作区目录与分支必须在，否则作用域损坏；已
+释放与已废弃的行若工作区仍在盘，按账移除。检查点行仍是 claims 的来
+源；活动派发组是进程内状态，恢复后在报告里显式降级，不静默。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+from workflow_controller.core.checkpoints import CheckpointTrigger
 from workflow_controller.core.workspace.oplog import (
     OperationPhase,
     RecoveryAction,
@@ -45,17 +46,18 @@ from workflow_controller.core.workspace.scope_tree import (
     ScopeKind,
     ScopeRecord,
     ScopeState,
+    ScopeTreeError,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
-    from pathlib import Path
 
     from workflow_controller.core.checkpoints import CheckpointStore, ScopeCheckpoint
     from workflow_controller.core.workspace.integration import IntegrationCoordinator
     from workflow_controller.core.workspace.manager import WorkspaceManager
     from workflow_controller.core.workspace.oplog import SagaOplog
     from workflow_controller.core.workspace.repository import WorkspaceRepository
+    from workflow_controller.core.workspace.scope_ledger import ScopeLedgerStore
     from workflow_controller.core.workspace.scope_tree import ScopeTree
 
 __all__ = [
@@ -69,6 +71,11 @@ _RETRACT_OP_KIND = "retract_integration_line"
 _PREPARE_OP_KIND = "prepare_scope_workspace"
 _INTEGRATE_OP_KIND = "integrate_scope"
 _RESTORE_OP_KIND = "restore_scope"
+
+# 工作区须在盘的状态；其余状态的工作区在不在盘都不改账
+_LIVE_STATES = (ScopeState.ACTIVE, ScopeState.AWAITING_INTEGRATION)
+# 工作区按账应已移除的状态；仍在盘即账面已落、移除未完成的崩溃残留
+_RECLAIMED_STATES = (ScopeState.RELEASED, ScopeState.DISCARDED)
 
 
 class WorkspaceRecoveryError(RuntimeError):
@@ -95,15 +102,9 @@ async def rebuild_workspace_tree(
     manager: WorkspaceManager,
     checkpoints: CheckpointStore,
     oplog: SagaOplog,
-    root_scope_id: str,
-    root_checkout_dir: Path | None = None,
-    main_writer_workspace_dir: Path | None = None,
+    ledger: ScopeLedgerStore,
 ) -> WorkspaceRecoveryReport:
-    """重建作用域账本并对账操作日志；对不上账抛错（分叉即停）。
-
-    root_checkout_dir / main_writer_workspace_dir 服务单会话树形态：根
-    检出与主写者工作区落在树目录内的固定目录（原目录保持基线不动）。
-    """
+    """从账本表重建作用域账本，对操作日志与盘上事实对账；对不上账抛错（分叉即停）。"""
     report = WorkspaceRecoveryReport()
     head = await repository.resolve_ref(ROOT_INTEGRATION_REF)
     seed = await repository.resolve_ref(ROOT_SEED_REF)
@@ -111,209 +112,118 @@ async def rebuild_workspace_tree(
         raise WorkspaceRecoveryError(
             f"私有仓根双引用缺失（head={head}，seed={seed}），无法恢复工作区树"
         )
-    rows = await checkpoints.list_for_tree(root_scope_id)
-    integrated_scopes = {
-        scope_id for scope_id, _commit in await integration.line_integration_order(head)
-    }
-    operations = oplog.all_operations()
-    records = await _rebuild_records(
-        rows,
-        root_scope_id=root_scope_id,
-        head=head,
-        seed=seed,
-        repository=repository,
-        integrated_scopes=integrated_scopes,
-        owners=_creating_owners(operations),
-        effective_integrations=_effective_integrations(operations),
-        root_checkout_dir=root_checkout_dir,
-        main_writer_workspace_dir=main_writer_workspace_dir,
-    )
-    root_epoch = _infer_root_epoch(records, operations)
-    records[0] = replace(records[0], root_epoch=root_epoch)
-    await scope_tree.load_records(records)
+    rows = await ledger.list_for_tree()
+    if not any(row.scope_kind is ScopeKind.ROOT for row in rows):
+        raise WorkspaceRecoveryError(
+            f"作用域账本没有根作用域 {ledger.root_scope_id} 的行：建树未完成，无法恢复工作区树"
+        )
+    # 闸门状态是进程内瞬态：崩溃时可能停在静止中或已静止，重建一律归运行并写回
+    records = [replace(row, gate_state=ScopeGateState.RUNNING) for row in rows]
+    if any(row.gate_state is not ScopeGateState.RUNNING for row in rows):
+        await ledger.upsert(records)
+    try:
+        await scope_tree.load_records(records)
+    except ScopeTreeError as exc:
+        raise WorkspaceRecoveryError(f"作用域账本对不上账：{exc}") from exc
     report.rebuilt_scope_ids = [record.scope_id for record in records]
-    report.root_epoch = root_epoch
     await _reconcile_oplog(
         oplog=oplog,
         repository=repository,
         integration=integration,
         manager=manager,
-        root_scope_id=root_scope_id,
+        root_scope_id=ledger.root_scope_id,
         scope_branches=_scope_branches(records),
         report=report,
     )
-    for record in records:
-        if record.state is ScopeState.ACTIVE and record.scope_kind is not ScopeKind.ROOT:
-            latest_start = _latest_row(rows, record.scope_id, "scope_start")
-            if latest_start is not None and latest_start.claims:
-                manager.restore_claims(record.scope_id, latest_start.claims)
-                report.claims_restored.append(record.scope_id)
-    if any(r.state is ScopeState.ACTIVE for r in records[1:]):
-        report.degraded.append("活动组内存态未恢复：恢复后的首个副作用将开新组")
-    if any(r.scope_kind is ScopeKind.SUBAGENT for r in records):
-        report.degraded.append("子代理作用域按检查点行重建：其会话映射与 reader 快照不恢复")
+    report.root_epoch = scope_tree.current_root_epoch
+    # 对账可能改动行（补账、后代废弃），盘上核验与降级判定取对账后的账
+    settled = await scope_tree.list_all_scopes()
+    for record in settled:
+        if record.scope_kind is ScopeKind.ROOT:
+            continue
+        path, branch = _workspace_location(record)
+        if record.state in _LIVE_STATES:
+            await _verify_live_workspace(repository, record, path, branch)
+        elif record.state in _RECLAIMED_STATES and path is not None and path.exists():
+            await integration.release_worktree(path)
+    await _restore_runtime_registries(manager, checkpoints, ledger.root_scope_id, settled, report)
     return report
 
 
-async def _rebuild_records(
-    rows: Sequence[ScopeCheckpoint],
-    *,
-    root_scope_id: str,
-    head: str,
-    seed: str,
+async def _verify_live_workspace(
     repository: WorkspaceRepository,
-    integrated_scopes: set[str],
-    owners: Mapping[str, str | None],
-    effective_integrations: set[tuple[str, int]],
-    root_checkout_dir: Path | None = None,
-    main_writer_workspace_dir: Path | None = None,
-) -> list[ScopeRecord]:
-    """由检查点行推断作用域行：根在前、子按行序，状态按事实定档、属主取建区意图。"""
-    root = ScopeRecord(
-        scope_id=root_scope_id,
-        parent_scope_id=None,
-        scope_kind=ScopeKind.ROOT,
-        owner_ref=None,
-        workspace_ref=(
-            root_checkout_dir if root_checkout_dir is not None else repository.root_dir
-        ).as_posix(),
-        scope_base_commit=seed,
-        integration_base_commit=head,
-        scope_epoch=INITIAL_EPOCH,
-        root_epoch=INITIAL_EPOCH,
-        gate_state=ScopeGateState.RUNNING,
-        state=ScopeState.ACTIVE,
-        created_at=rows[0].created_at if rows else "1970-01-01T00:00:00+00:00",
-    )
-    latest_by_scope: dict[str, ScopeCheckpoint] = {}
-    for row in rows:
-        if row.scope_id == root_scope_id:
-            continue
-        current = latest_by_scope.get(row.scope_id)
-        if current is None or (row.created_at, row.checkpoint_id) >= (
-            current.created_at,
-            current.checkpoint_id,
-        ):
-            latest_by_scope[row.scope_id] = row
-    records = [root]
-    for scope_id, latest in latest_by_scope.items():
-        if not latest.parent_scope_id:
-            raise WorkspaceRecoveryError(f"检查点行缺父引用，对不上账：{scope_id}")
-        branch = latest.workspace_branch or ""
-        workspace_ref: str | None = None
-        state = ScopeState.DISCARDED
-        if branch:
-            if (
-                main_writer_workspace_dir is not None
-                and latest.parent_scope_id == root_scope_id
-                and latest.scope_kind is ScopeKind.MAIN_WRITER
-            ):
-                workspace_path = main_writer_workspace_dir
-            else:
-                workspace_path = repository.workspaces_dir / branch.removeprefix("scope/")
-            workspace_ref = f"{workspace_path.as_posix()}|{branch}"
-            # 本代次的集成已生效：线上有它的集成提交，或操作日志里集成操作已写/已收口。
-            # 删除：作用域账本落表后由账本行承载
-            integrated = (
-                scope_id in integrated_scopes
-                or (scope_id, latest.scope_epoch) in effective_integrations
-            )
-            if workspace_path.exists():
-                # 集成后工作区可能仍在盘（保留配置、单会话主写者、释放前崩溃），
-                # 在盘不说明仍在执行
-                state = ScopeState.INTEGRATED if integrated else ScopeState.ACTIVE
-            elif integrated:
-                state = ScopeState.INTEGRATED
-            elif await repository.resolve_ref(f"refs/heads/{branch}") is None:
-                # 分支引用仍在是历史事实的下界：连分支都不在则对不上账
-                raise WorkspaceRecoveryError(f"作用域分支缺失，对不上账：{scope_id}（{branch}）")
-        records.append(
-            ScopeRecord(
-                scope_id=scope_id,
-                parent_scope_id=latest.parent_scope_id,
-                scope_kind=ScopeKind(latest.scope_kind),
-                owner_ref=owners.get(scope_id),
-                workspace_ref=workspace_ref,
-                scope_base_commit=latest.workspace_commit,
-                integration_base_commit=_scope_start_base(rows, scope_id),
-                scope_epoch=latest.scope_epoch,
-                root_epoch=latest.root_epoch,
-                gate_state=ScopeGateState.RUNNING,
-                state=state,
-                created_at=latest.created_at,
-            )
+    record: ScopeRecord,
+    path: Path | None,
+    branch: str,
+) -> None:
+    """活动与待集成作用域的盘上核验：工作区目录与分支必须在，不在即作用域损坏。"""
+    if path is None or not path.exists():
+        where = path if path is not None else "账本行没有工作区引用"
+        raise WorkspaceRecoveryError(
+            f"作用域损坏：{record.scope_id}（{record.state.value}）的工作区目录不在盘上：{where}"
         )
-    return records
+    # reader 快照是 detached 工作区，没有分支
+    if branch and await repository.resolve_ref(f"refs/heads/{branch}") is None:
+        raise WorkspaceRecoveryError(
+            f"作用域损坏：{record.scope_id}（{record.state.value}）的分支不在私有仓：{branch}"
+        )
 
 
-def _creating_owners(operations: Sequence[SagaOperation]) -> dict[str, str | None]:
-    """作用域 → 建区时登记的属主。
-
-    账本的属主只在作用域建立时写入、此后不变（同键重建不覆盖），所以取
-    该作用域第一条未被放弃的建区操作。
-    """
-    owners: dict[str, str | None] = {}
-    for operation in operations:
-        if operation.op_kind != _PREPARE_OP_KIND or operation.phase is OperationPhase.ABANDONED:
-            continue
-        owner = cast("str | None", operation.metadata.get("owner_ref"))
-        owners.setdefault(str(operation.metadata.get("scope_id")), owner)
-    return owners
-
-
-def _effective_integrations(operations: Sequence[SagaOperation]) -> set[tuple[str, int]]:
-    """已生效的集成操作：(作用域, 代次)。
-
-    已写或已收口的集成才算生效：意图阶段的集成可能根本没发生。按代次
-    匹配，废弃后同键重建的新一代不继承上一代的集成事实。
-    删除：作用域账本落表后由账本行承载。
-    """
-    return {
-        (str(operation.metadata.get("scope_id")), operation.scope_epoch)
-        for operation in operations
-        if operation.op_kind == _INTEGRATE_OP_KIND
-        and operation.phase in (OperationPhase.GIT_WRITTEN, OperationPhase.COMMITTED)
-    }
-
-
-def _scope_start_base(rows: Sequence[ScopeCheckpoint], scope_id: str) -> str | None:
-    """作用域建区时的集成头：取该作用域最近一行 scope_start 的列值。"""
-    start = _latest_row(rows, scope_id, "scope_start")
-    return start.integration_commit if start is not None else None
+async def _restore_runtime_registries(
+    manager: WorkspaceManager,
+    checkpoints: CheckpointStore,
+    root_scope_id: str,
+    records: list[ScopeRecord],
+    report: WorkspaceRecoveryReport,
+) -> None:
+    """重建进程内登记：claims 取自检查点行的声明列，reader 快照取自没有分支段的行。"""
+    live = [
+        record
+        for record in records
+        if record.scope_kind is not ScopeKind.ROOT and record.state in _LIVE_STATES
+    ]
+    manager.restore_reader_scopes(
+        record.scope_id for record in live if not _workspace_location(record)[1]
+    )
+    if not live:
+        return
+    # 检查点行只到根与直接子作用域；同键重建有多行 scope_start，取最近一行
+    scope_starts = [
+        row
+        for row in await checkpoints.list_for_tree(root_scope_id)
+        if row.trigger is CheckpointTrigger.SCOPE_START
+    ]
+    for record in live:
+        row = _latest_row(scope_starts, record.scope_id)
+        if row is not None and row.claims:
+            manager.restore_claims(record.scope_id, row.claims)
+            report.claims_restored.append(record.scope_id)
+    report.degraded.append("活动组内存态未恢复：恢复后的首个副作用将开新组")
 
 
-def _latest_row(
-    rows: Sequence[ScopeCheckpoint], scope_id: str, trigger: str
-) -> ScopeCheckpoint | None:
-    """作用域指定触发的最新一行。"""
-    matched = [row for row in rows if row.scope_id == scope_id and row.trigger.value == trigger]
+def _latest_row(rows: Sequence[ScopeCheckpoint], scope_id: str) -> ScopeCheckpoint | None:
+    """作用域指定触发的最新一行；没有返回 None。"""
+    matched = [row for row in rows if row.scope_id == scope_id]
     if not matched:
         return None
     return max(matched, key=lambda row: (row.created_at, row.checkpoint_id))
 
 
-def _infer_root_epoch(records: Sequence[ScopeRecord], operations: Sequence[SagaOperation]) -> int:
-    """推断当前根代次：检查点行与已生效集成线回退（已写或已收口）取最大。"""
-    epoch = max((record.root_epoch for record in records), default=INITIAL_EPOCH)
-    for operation in operations:
-        if operation.op_kind == _RETRACT_OP_KIND and operation.phase in (
-            OperationPhase.GIT_WRITTEN,
-            OperationPhase.COMMITTED,
-        ):
-            # 线未动（已记新头即旧头）的回退不推进根代次
-            advance = 1 if operation.actual_new_head != operation.expected_old_head else 0
-            epoch = max(epoch, operation.root_epoch + advance)
-    return epoch
+def _workspace_location(record: ScopeRecord) -> tuple[Path | None, str]:
+    """解码行的工作区引用「路径|分支」；没有引用返回 (None, 空串)。"""
+    if not record.workspace_ref:
+        return None, ""
+    path, _, branch = record.workspace_ref.rpartition("|")
+    return Path(path), branch
 
 
-def _scope_branches(records: Sequence[ScopeRecord]) -> dict[str, str]:
-    """重建账本内各作用域的分支名（工作区引用的分支段；根检出与 reader 快照没有）。"""
+def _scope_branches(records: list[ScopeRecord]) -> dict[str, str]:
+    """账本内各作用域的分支名（根检出的引用不带分支段，reader 快照没有分支）。"""
     return {
         record.scope_id: branch
         for record in records
         if record.scope_kind is not ScopeKind.ROOT
-        if record.workspace_ref
-        if (branch := record.workspace_ref.rpartition("|")[2])
+        if (branch := _workspace_location(record)[1])
     }
 
 
@@ -327,7 +237,11 @@ async def _reconcile_oplog(
     scope_branches: Mapping[str, str],
     report: WorkspaceRecoveryReport,
 ) -> None:
-    """操作日志三态核对：在操作所在的引用上取实测头，未生效放弃、已写补账、分叉即停。"""
+    """操作日志三态核对：在操作所在的引用上取实测头，未生效放弃、已写补账、分叉即停。
+
+    核对通过（操作已生效）的先补账面后果再收口；补账幂等，补账后、收
+    口前再崩溃由下一次恢复跳过已落账的行。
+    """
     for operation in await oplog.pending_operations():
         if operation.op_kind == _RETRACT_OP_KIND:
             await _reconcile_retract(
@@ -354,6 +268,7 @@ async def _reconcile_oplog(
             await oplog.abandon(operation.client_op_id)
             report.abandoned_op_ids.append(operation.client_op_id)
         elif decision.action is RecoveryAction.COMPLETE_LEDGER:
+            await _complete_ledger(manager, operation)
             await oplog.commit(operation.client_op_id)
             report.completed_op_ids.append(operation.client_op_id)
         else:
@@ -361,6 +276,14 @@ async def _reconcile_oplog(
                 f"操作 {operation.client_op_id}（{operation.op_kind}）与引用 {ref} 对不上账："
                 f"{decision.detail}"
             )
+
+
+async def _complete_ledger(manager: WorkspaceManager, operation: SagaOperation) -> None:
+    """已生效操作的账面后果：建区只收口不补行，集成与恢复各自补到行上。"""
+    if operation.op_kind == _INTEGRATE_OP_KIND:
+        await manager.complete_integration_ledger(operation)
+    elif operation.op_kind == _RESTORE_OP_KIND:
+        await manager.complete_restore_ledger(operation)
 
 
 def _operation_ref(

@@ -16,9 +16,9 @@
 
 建区经私有仓完成检出与物化、账本登记激活，全程走三阶段操作日志；
 集成前先落父侧与写者侧的未提交状态，再交集成协调器按两档判定并
-入父树；废弃在换代前先物理移除目标及后代工作区；释放把已集成或
-已废弃的工作区裁剪掉、分支保留。本模块不直接调 git，一切 git 操
-作经私有仓与集成协调器。
+入父树；废弃先把换代落账、再物理移除目标及后代工作区；释放把已
+集成或已废弃的工作区裁剪掉、分支保留。本模块不直接调 git，一切
+git 操作经私有仓与集成协调器。
 """
 
 from __future__ import annotations
@@ -65,7 +65,6 @@ from workflow_controller.core.workspace.scope_tree import (
     ScopeGateState,
     ScopeKind,
     ScopeState,
-    ScopeTreeError,
 )
 
 if TYPE_CHECKING:
@@ -216,7 +215,6 @@ class WorkspaceManager:
                 metadata={
                     "scope_id": request.scope_key,
                     "parent_scope_id": parent.scope_id,
-                    "owner_ref": request.spec.owner_ref,
                     "branch": self._repository.scope_branch_for(workspace_scope_key),
                 },
             )
@@ -405,8 +403,8 @@ class WorkspaceManager:
     ) -> ScopeRestored:
         """组检查点恢复：闸门内 reset 到组恢复点并撤回全部组内副作用。
 
-        物理序：先移除后代工作区，再闸门内落当前态、reset 到组恢复点；
-        账面序：目标换代保持活动、后代废弃换代；全程三阶段记账。
+        闸门内落当前态、reset 到组恢复点并记新头；账面（目标换代保持活动、
+        后代废弃换代）落表后才移除后代工作区；全程三阶段记账。
         """
         record = await self._require_scope(scope_id)
         if record.scope_kind is ScopeKind.ROOT:
@@ -416,12 +414,6 @@ class WorkspaceManager:
                 f"作用域非活动态不能恢复：{scope_id}（{record.state.value}）"
             )
         verified = await self._tree.require_scope_epoch(scope_id, expected_scope_epoch)
-        for descendant in await self._tree.list_descendants(scope_id):
-            if descendant.workspace_ref is None:
-                continue
-            path, _branch = self._parse_workspace_ref(descendant.workspace_ref)
-            if path.exists():
-                await self._coordinator.release_worktree(path)
         writer_path, _branch = self._require_workspace(verified)
         writer_target = WorkspaceTarget(path=writer_path, separated_env=False)
         async with self._quiesced(scope_id):
@@ -446,6 +438,8 @@ class WorkspaceManager:
             for item in abandoned:
                 self._claims.release(item.scope_id)
                 self._reader_scopes.discard(item.scope_id)
+            for descendant in await self._tree.list_descendants(scope_id):
+                await self._release_workspace_if_present(descendant)
             await self._oplog.commit(
                 client_op_id,
                 result={"restore_commit": restore_commit},
@@ -805,23 +799,27 @@ class WorkspaceManager:
         )
 
     async def _abandon_scope_physically(self, target: ScopeRecord) -> list[AbandonedScope]:
-        """先移除目标及后代工作区，再账面各自换代一次并回收登记。"""
-        for record in (target, *await self._tree.list_descendants(target.scope_id)):
-            if record.workspace_ref is None:
-                continue
-            path, _branch = self._parse_workspace_ref(record.workspace_ref)
-            if path.exists():
-                await self._coordinator.release_worktree(path)
+        """账面各自换代一次并落表，随后才移除目标及后代工作区。"""
         abandoned = await self._tree.abandon_scope(
             target.scope_id, expected_scope_epoch=target.scope_epoch
         )
         for item in abandoned:
             self._claims.release(item.scope_id)
             self._reader_scopes.discard(item.scope_id)
+        for record in (target, *await self._tree.list_descendants(target.scope_id)):
+            await self._release_workspace_if_present(record)
         return abandoned
 
+    async def _release_workspace_if_present(self, record: ScopeRecord) -> None:
+        """作用域的工作区仍在盘则移除（分支保留）；没有工作区引用则跳过。"""
+        if record.workspace_ref is None:
+            return
+        path, _branch = self._parse_workspace_ref(record.workspace_ref)
+        if path.exists():
+            await self._coordinator.release_worktree(path)
+
     async def release_scope(self, scope_id: str) -> ScopeRecord:
-        """回收工作区：物理裁剪工作树，已集成者账面转已释放，分支保留。"""
+        """回收工作区：已集成者账面先转已释放并落表，随后裁剪工作树，分支保留。"""
         record = await self._require_scope(scope_id)
         if record.scope_kind is ScopeKind.ROOT:
             raise WorkspaceManagerError("根作用域不可释放")
@@ -829,12 +827,9 @@ class WorkspaceManager:
             raise WorkspaceManagerError(
                 f"作用域当前状态不可释放：{record.scope_id}（{record.state.value}）"
             )
-        if record.workspace_ref is not None:
-            path, _branch = self._parse_workspace_ref(record.workspace_ref)
-            if path.exists():
-                await self._coordinator.release_worktree(path)
         if record.state is ScopeState.INTEGRATED:
             record = await self._tree.set_state(scope_id, ScopeState.RELEASED)
+        await self._release_workspace_if_present(record)
         self._claims.release(scope_id)
         self._reader_scopes.discard(scope_id)
         return record
@@ -852,6 +847,60 @@ class WorkspaceManager:
         if claims:
             self._claims.register(scope_id, claims)
 
+    def restore_reader_scopes(self, scope_ids: Iterable[str]) -> None:
+        """崩溃恢复后补登记 reader 快照作用域（工作区引用没有分支段的行）。"""
+        self._reader_scopes.update(scope_ids)
+
+    async def complete_integration_ledger(self, operation: SagaOperation) -> None:
+        """集成的崩溃补账：集成已生效的作用域行转已集成。
+
+        只在操作日志按父作用域引用核对通过后调用；行已是已集成或已
+        释放即崩溃前已落账，跳过。行与操作对不上（作用域不在账本内、
+        代次不符或不在待集成态）显式失败。
+        """
+        if operation.op_kind != "integrate_scope":
+            raise WorkspaceManagerError(f"非集成操作：{operation.client_op_id}")
+        scope_id = str(operation.metadata.get("scope_id"))
+        record = await self._tree.get_scope(scope_id)
+        if record is None or record.scope_epoch != operation.scope_epoch:
+            raise WorkspaceManagerError(f"集成操作与作用域账对不上账：{operation.client_op_id}")
+        if record.state in (ScopeState.INTEGRATED, ScopeState.RELEASED):
+            return
+        if record.state is not ScopeState.AWAITING_INTEGRATION:
+            raise WorkspaceManagerError(
+                f"集成已生效但作用域不在待集成态：{scope_id}（{record.state.value}）"
+            )
+        self._claims.release(scope_id)
+        await self._tree.set_state(scope_id, ScopeState.INTEGRATED)
+
+    async def complete_restore_ledger(self, operation: SagaOperation) -> None:
+        """组检查点恢复的崩溃补账：目标换代保持活动、后代废弃换代，随后移除后代工作区。
+
+        只在操作日志按作用域分支核对通过后调用；目标行已是新代次即崩
+        溃前已落账，跳过。行与操作对不上显式失败。
+        """
+        if operation.op_kind != "restore_scope":
+            raise WorkspaceManagerError(f"非组检查点恢复操作：{operation.client_op_id}")
+        scope_id = str(operation.metadata.get("scope_id"))
+        record = await self._tree.get_scope(scope_id)
+        if record is None:
+            raise WorkspaceManagerError(f"恢复操作与作用域账对不上账：{operation.client_op_id}")
+        if record.scope_epoch == operation.scope_epoch + 1:
+            return
+        if record.scope_epoch != operation.scope_epoch or record.state is not ScopeState.ACTIVE:
+            raise WorkspaceManagerError(
+                f"恢复已生效但作用域不在活动态或代次不符：{scope_id}"
+                f"（{record.state.value}，epoch={record.scope_epoch}）"
+            )
+        _restored, abandoned = await self._tree.restore_scope(
+            scope_id, expected_scope_epoch=operation.scope_epoch
+        )
+        for item in abandoned:
+            self._claims.release(item.scope_id)
+            self._reader_scopes.discard(item.scope_id)
+        for descendant in await self._tree.list_descendants(scope_id):
+            await self._release_workspace_if_present(descendant)
+
     async def complete_retraction_ledger(self, operation: SagaOperation) -> None:
         """集成线回退的崩溃补账：根代次推进与失效废弃按已生效事实补齐。
 
@@ -861,25 +910,26 @@ class WorkspaceManager:
         """
         if operation.op_kind != "retract_integration_line":
             raise WorkspaceManagerError(f"非集成线回退操作：{operation.client_op_id}")
-        # 线未动（已记新头即旧头）的回退不推进根代次
+        # 线未动（已记新头即旧头）的回退不推进根代次；根行已是推进后的代次即已补账
         line_moved = operation.actual_new_head != operation.expected_old_head
         if line_moved:
-            try:
+            current = self._tree.current_root_epoch
+            if current == operation.root_epoch:
                 await self._tree.advance_root_epoch(expected_root_epoch=operation.root_epoch)
-            except ScopeTreeError as exc:
-                if exc.current_root_epoch != operation.root_epoch + 1:
-                    raise
+            elif current != operation.root_epoch + 1:
+                raise WorkspaceManagerError(
+                    f"根代次与回退操作对不上账：{operation.client_op_id}（current={current}）"
+                )
+        # 收口结果须列全失效集：编排层按回执里的作用域清单落失效账，重放时读的就是它
         abandoned: list[tuple[str, int]] = []
         for scope_id in operation.metadata.get("invalidated", ()):
             record = await self._tree.get_scope(str(scope_id))
             if record is None:
-                continue  # 未经检查点行重建的边角（显式降级面）
-            try:
-                items = await self._abandon_scope_physically(record)
-            except ScopeTreeError as exc:
-                if exc.current_scope_epoch == record.scope_epoch + 1:
-                    continue  # 崩溃前已废弃过（部分补账幂等）
-                raise
+                continue  # 不在账本内
+            if record.state is ScopeState.DISCARDED:
+                abandoned.append((record.scope_id, record.scope_epoch))  # 崩溃前已废弃过
+                continue
+            items = await self._abandon_scope_physically(record)
             for item in items:
                 abandoned.append((item.scope_id, item.new_scope_epoch))
         await self._oplog.commit(

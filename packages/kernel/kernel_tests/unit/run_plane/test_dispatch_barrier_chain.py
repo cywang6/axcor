@@ -450,7 +450,7 @@ async def test_barrier_wait_window_closes_with_fault(tmp_path: Path) -> None:
 def _drop_workspace_tree(h: BridgeHarness) -> None:
     """让内存里的工作区树运行时离场（模拟重启或重开后树只在盘上）。"""
     tree = h.coord._workspace_trees.pop(h.run_id)
-    tree.checkpoints.close()
+    tree.close()
 
 
 async def test_barrier_rebuilds_tree_left_only_on_disk(
@@ -488,15 +488,18 @@ async def test_barrier_rebuilds_tree_left_only_on_disk(
 
 
 async def test_list_run_scopes_rebuilds_tree_left_only_on_disk(tmp_path: Path) -> None:
-    """树只在盘上而 run 仍在运行：作用域查询重建树，账面行带回属主。"""
-    h = await _setup_run(tmp_path)
+    """树只在盘上而 run 仍在运行：作用域查询重建树，返回的行与重启前逐字段一致。"""
+    h = await _setup_run(tmp_path, scope_keys=("node-a", "node-a2"))  # 节点重试：旧作用域已废弃
     try:
+        before = await h.coord.list_run_scopes(h.run_id)
         _drop_workspace_tree(h)
-        scopes = {
-            s["scope_id"]: (s["owner_ref"], s["state"])
-            for s in await h.coord.list_run_scopes(h.run_id)
+        assert await h.coord.list_run_scopes(h.run_id) == before
+        scopes = {s["scope_id"]: (s["owner_ref"], s["state"], s["scope_epoch"]) for s in before}
+        assert scopes == {
+            f"{h.run_id}-root": (None, "active", 1),
+            "node-a": ("a", "discarded", 2),
+            "node-a2": ("a", "active", 1),
         }
-        assert scopes == {f"{h.run_id}-root": (None, "active"), "node-a": ("a", "active")}
     finally:
         await _finish_run(h)
 

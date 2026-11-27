@@ -212,7 +212,7 @@ async def test_parallel_nodes_isolate_then_integrate_into_root(tmp_path: Path) -
 
 
 async def test_crash_recovery_rebuilds_workspace_tree_and_resumes(tmp_path: Path) -> None:
-    """崩溃后重开：树运行时经深度恢复重建（检查点行 + 私有仓事实）后续跑。
+    """崩溃后重开：树运行时经深度恢复从作用域账本表重建后续跑。
 
     n1 已集成（账面重建保留）、n2 崩溃时在跑（重排走欠账清理：旧作用域
     废弃、新工作区重跑）；集成线与根检出原样，根代次不变。
@@ -367,7 +367,7 @@ async def test_cold_recovery_dispatch_barrier_rebuilds_workspace_tree(
     """进程重启后工作区树不在内存：成员会话的屏障重建树后执行，不静默直通。
 
     节点沿用原作用域续跑；task 派发拿到子工作区 cwd，副作用落组检查点，
-    作用域查询带回节点属主（属主随建区意图持久化、恢复时回填）。
+    作用域查询带回节点属主（属主随账本行落表）。
     """
     env = GraphRunPlaneEnv(tmp_path, auto_release=False)
     yaml_path = _write_traceback_workflow(

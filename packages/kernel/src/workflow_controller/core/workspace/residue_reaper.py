@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""工作区残留 TTL 清理器：单会话崩溃残留树、过期检查点行与 fork 孤儿目录。
+"""工作区残留 TTL 清理器：单会话崩溃残留树、过期账本行与 fork 孤儿目录。
 
 正常路径的树回收是确定性的（终态同步干净即整树删除、会话删除即回收），
 本清理器只兜崩溃/断电窗口：守护进程死在「树已落盘、会话已消失」的组合里。
@@ -40,9 +40,10 @@ from typing import TYPE_CHECKING, Any
 
 from workflow_controller.core.checkpoints import CheckpointStore
 from workflow_controller.core.session_workspace import derive_original_dir
+from workflow_controller.core.workspace.scope_ledger import ScopeLedgerStore
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,7 @@ def _session_is_live(session: Any, cutoff: float) -> bool:
 
 
 class WorkspaceResidueReaper:
-    """单会话残留树 + 过期检查点行 + fork 孤儿目录的 TTL 清理器。"""
+    """单会话残留树 + 过期账本行（检查点与作用域）+ fork 孤儿目录的 TTL 清理器。"""
 
     def __init__(
         self,
@@ -184,15 +185,29 @@ class WorkspaceResidueReaper:
         return report
 
     async def _delete_tree_rows(self, sid: str) -> int:
-        """删除残留树的检查点行（树根作用域锚定，best-effort）。"""
-        store = CheckpointStore(self._checkpoint_db_path())
+        """删除残留树的检查点行与作用域账本行（树根作用域锚定，best-effort）。"""
+        root_scope_id = f"{sid}-root"
+        db_path = self._checkpoint_db_path()
+        checkpoints = CheckpointStore(db_path)
+        ledger = ScopeLedgerStore(db_path, root_scope_id=root_scope_id)
         try:
-            return int(await store.delete_for_tree(f"{sid}-root"))
-        except Exception:
-            logger.debug("残留清理：检查点行删除失败（不阻塞树回收）", exc_info=True)
-            return 0
+            removed = await self._delete_rows_best_effort(
+                checkpoints.delete_for_tree(root_scope_id)
+            )
+            await self._delete_rows_best_effort(ledger.delete_for_tree())
+            return removed
         finally:
-            store.close()
+            checkpoints.close()
+            ledger.close()
+
+    @staticmethod
+    async def _delete_rows_best_effort(coroutine: Awaitable[int]) -> int:
+        """执行一次删行；失败只留痕、返回 0（不阻塞树回收）。"""
+        try:
+            return int(await coroutine)
+        except Exception:
+            logger.debug("残留清理：账本行删除失败（不阻塞树回收）", exc_info=True)
+            return 0
 
     async def _reap_fork_roots(self, sessions: list[Any], cutoff: float) -> _ReapReport:
         """清理 tempdir 里的 fork 孤儿目录（近期活动会话引用的受保护）。"""

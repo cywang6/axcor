@@ -221,10 +221,6 @@ class SagaOplog:
             if operation.phase in (OperationPhase.PREPARED, OperationPhase.GIT_WRITTEN)
         ]
 
-    def all_operations(self) -> list[SagaOperation]:
-        """全部操作行（建账序）；深度恢复的代次推断与对账用。"""
-        return list(self._operations.values())
-
     async def resolve(
         self,
         client_op_id: str,

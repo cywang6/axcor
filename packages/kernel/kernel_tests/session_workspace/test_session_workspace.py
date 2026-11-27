@@ -305,7 +305,7 @@ async def test_baseline_external_addition_survives_sync(tmp_path):
 
 
 async def test_crash_reopen_recovers_tree(tmp_path):
-    """崩溃重开：注册表丢失后按检查点账与私有仓事实重建，工作区续用。"""
+    """崩溃重开：注册表丢失后从作用域账本表重建，工作区续用。"""
     h = Harness(tmp_path)
     await h.migrate()
     session = h.add_session("sess-1")
@@ -329,14 +329,14 @@ async def test_crash_reopen_recovers_tree(tmp_path):
 
 
 async def test_crash_window_between_prepare_and_checkpoint_row(tmp_path):
-    """崩溃窗（建区已落盘、检查点行未落）：重开清理半成品后重建主写者。"""
+    """崩溃窗（建区已落账、scope_start 检查点行未落）：重开清理半成品后重建主写者。"""
     import sqlite3
 
     h = Harness(tmp_path)
     await h.migrate()
     session = h.add_session("sess-1")
     entry = await h.host.prepare_session(session)
-    # 砍掉主写者检查点行：恢复面看不到该作用域，但工作区/分支仍在盘上
+    # 砍掉主写者的 scope_start 行：账本行仍在（建区已落账），工作区/分支也仍在盘上
     conn = sqlite3.connect(h.db_path)
     conn.execute(
         "DELETE FROM scope_checkpoints WHERE scope_id = ?", (entry.tree.main_writer_scope_id,)

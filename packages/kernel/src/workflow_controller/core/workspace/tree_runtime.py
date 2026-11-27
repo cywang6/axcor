@@ -15,10 +15,11 @@
 """作用域树运行时的共享装配：Graph run 与单会话两平面共用的树组件。
 
 树运行时把私有仓、账本、闸门、操作日志、集成协调器、管理器、检查点
-账本与组仲裁装配为一件可执行单元；首个工作区动作惰性建立，重开或崩
-溃后的既有仓经深度恢复重建账本（对不上账显式失败）。本模块自 run
-协调器抽出，供会话宿主侧等价装配（树 id 与根作用域标识不同），并
-承载两平面共用的生命周期检查点落账与子代理结果收尾链。
+账本、作用域账本存储与组仲裁装配为一件可执行单元；首个工作区动作惰
+性建立，重开或崩溃后的既有仓经深度恢复从账本表重建账本（对不上账
+显式失败）。本模块自 run 协调器抽出，供会话宿主侧等价装配（树 id 与
+根作用域标识不同），并承载两平面共用的生命周期检查点落账与子代理结
+果收尾链。
 """
 
 from __future__ import annotations
@@ -62,6 +63,7 @@ from workflow_controller.core.workspace.recovery import (
     rebuild_workspace_tree,
 )
 from workflow_controller.core.workspace.repository import WorkspaceRepository
+from workflow_controller.core.workspace.scope_ledger import ScopeLedgerStore
 from workflow_controller.core.workspace.scope_tree import (
     ScopeKind,
     ScopeRecord,
@@ -206,7 +208,11 @@ class WorkspaceTreeRuntime:
         self.tree_dir = repository.tree_dir
         self.repository = repository
         self.replay_ledger = DispatchReplayLedger(repository.tree_dir / "dispatch")
-        scope_tree = ScopeTree()
+        self.root_scope_id = root_scope_id or f"{tree_id}-root"
+        # 作用域账本与检查点账本同库：行随动作落表，重开或崩溃后据此重建
+        self.checkpoints = checkpoints
+        self.ledger = ScopeLedgerStore(checkpoints.db_path, root_scope_id=self.root_scope_id)
+        scope_tree = ScopeTree(store=self.ledger)
         oplog = SagaOplog(repository.tree_dir)
         integration = IntegrationCoordinator(
             repository, conflict_policy=ConflictPolicy(config.conflict_policy)
@@ -224,12 +230,10 @@ class WorkspaceTreeRuntime:
             drain_background_writers=drain_background_writers,
             claims_enforce=config.claims_enforce,
         )
-        self.checkpoints = checkpoints
         self.arbiter = DispatchGroupArbiter(self.manager, checkpoints, self.replay_ledger)
         self.retain_after_merge = config.retain_after_merge
         self.on_no_dispatch_barrier = config.on_no_dispatch_barrier
         self.barrier_wait_timeout_s = config.background_drain_timeout_s
-        self.root_scope_id = root_scope_id or f"{tree_id}-root"
         self._config = config
         self._root_checkout_subdir = root_checkout_subdir
         self._child_seq = 0
@@ -250,6 +254,11 @@ class WorkspaceTreeRuntime:
         """是否单会话形态（根检出在树目录内、主写者工作区固定 root/）。"""
         return self._root_checkout_subdir is not None
 
+    def close(self) -> None:
+        """释放检查点账本与作用域账本的连接（树运行时离场时调用）。"""
+        self.checkpoints.close()
+        self.ledger.close()
+
     async def initialize(self) -> None:
         """建立根作用域并持久化树配置；私有仓已存在时走深度恢复重建账本。"""
         if self.repository.repo_dir.exists():
@@ -260,11 +269,7 @@ class WorkspaceTreeRuntime:
                 manager=self.manager,
                 checkpoints=self.checkpoints,
                 oplog=self.oplog,
-                root_scope_id=self.root_scope_id,
-                root_checkout_dir=self.root_checkout_dir if self.session_shaped else None,
-                main_writer_workspace_dir=(
-                    self.repository.tree_dir / "root" if self.session_shaped else None
-                ),
+                ledger=self.ledger,
             )
             if self.recovery_report.degraded:
                 logger.warning(
@@ -274,6 +279,8 @@ class WorkspaceTreeRuntime:
                 )
             return
         persist_tree_config(self.repository.tree_dir, self._config)
+        # 全新建树前清掉同根的残留行（上一棵树回收后留在表里的账）
+        await self.ledger.delete_for_tree()
         refs = await self.manager.initialize_root(
             scope_id=self.root_scope_id,
             root_workspace_dir=self.root_checkout_dir if self.session_shaped else None,

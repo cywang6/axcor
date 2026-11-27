@@ -25,7 +25,7 @@
 | #67 | 已完成 | 本 commit | 深度恢复按操作种类与阶段在所在引用上核对：建区与恢复取作用域分支、集成取父作用域引用（父为根即集成线）；引用定位不出或已被删除时显式失败 |
 | #68 | 已完成 | 本 commit | 对话恢复数据（定位 transcript、截断、种子）整体前移到组检查点 reset 之前：备不好即失败时文件态、代次、后代工作区与旧会话原样未动；两个平面的失败都回收种子目录，回执或报错点名阶段 |
 | #69 | 已完成 | 本 commit | 恢复按集成证据（线上集成提交或本代次已生效的集成操作）重建状态，工作区在盘不再等于活动：保留配置下回退目标可受理、已集成的兄弟按保留者重放；默认配置下已释放的空集成可作回退目标，单会话终态集成后重开可再次收口 |
-| #70 | | | |
+| #70 | 已完成 | 本 commit | `scopes` 表落地为作用域状态的事实源：账本行随动作落表，恢复从推断改为读表 + 对操作日志与盘上事实对账；补账按行状态幂等，废弃与释放先落表再移除工作区，活动作用域工作区不在盘显式失败 |
 | #71 | | | |
 | #72 | | | |
 | #73 | | | |
@@ -625,6 +625,100 @@ run 平面 `packages/plugins/graph/tests/test_workspace_run_plane.py`：`test_ge
 - 「集成已生效、节点未落 passed」崩溃窗在 Graph 平面的收口是重排重跑（多跑一次节点），不是沿原作用域直接落 passed。探针里修复前后一致；中间机制未核实，未处理。
 - `test_barrier_wait_window_closes_with_fault` 在相关目录批跑时再次抖动失败一次（实得能力门拒绝、没等到等待超窗），单独重跑三次通过，全量里通过。与 #67 顺带发现是同一条。
 - reader 快照作用域没有自己的检查点行，崩溃后不进重建面：它不在重建的账本里，父作用域此后废弃时也不会回收它的 detached 工作区（走读）。子代理层不进重建面归 #74，一并考虑。
+
+### #70 [traceback] M2 规格 §7 的 scopes 表未实现：账本纯内存、靠推断重建
+
+**根因**
+
+作用域账本（`core/workspace/scope_tree.py` 的 `ScopeTree`）只在内存维护，规格冻结的 `scopes` 表从未建表。重开或崩溃后树运行时缺席，`core/workspace/recovery.py` 的 `rebuild_workspace_tree` 以检查点行加私有仓事实推断重建账本：状态按「工作区在盘 → 活动 / 分支进过集成线 → 已集成 / 其余已废弃」（#69 起加「操作日志里集成已写或已收口」的证据），两层代次与分支整体取自检查点行，属主从操作日志的建区意图回填，根代次取检查点行与已生效回退操作的最大值。
+
+推断与事实之间有四类错位：检查点行只在建区、组检查点与终态时落，废弃换代、回退失效、同键重建都不写行，代次与分支一到这些路径就与事实脱节；已释放被收敛成已集成；工作区是否在盘被当成执行态的证据；每次恢复都要从「盘上还剩什么」反推「账上应当是什么」，恢复对账（#67）因此只能建立在推断结果之上。
+
+一次性探针在修复前源码上跑同一现场（建区、集成后释放、废弃、废弃后同键重建），对照重启前后的（状态, 代次, 分支）：已释放的 `node-a`、`node-b`、`node-w1` 回来是 `integrated`；废弃的 `node-w3` 代次 2 回到 1；废弃后同键重建、实际活动在代次 2 与 `scope/node-rb-e2` 分支上的 `node-rb`，回来是 `discarded`、代次 1、指向上一代分支 `scope/node-rb`。
+
+**修复**
+
+- 规格回写（`docs/specs/traceback-workspace-rollback.md`）：§7 `scopes` 表主键改为（根作用域标识, 作用域标识），增 `seq` 建区序号列；写明账本行是作用域状态的事实源、落表时机与写序、恢复读表并对账。§11 增「作用域账本对账」：读表 → 对操作日志核对并补账面后果 → 对盘上事实；根行缺席按建树未完成显式失败。§5.3 的 ScopeTree 行补落表职责，新增账本存储模块行。
+- 账本表与存储（新 `core/workspace/scope_ledger.py`）：`SCOPES_DDL` 归 RunStore 统一迁移（`SCHEMA_VERSION` 6 → 7，幂等位特征探针增 `scopes` 表）。`ScopeLedgerStore` 按树绑定根作用域标识：`upsert` 多行同一事务、同键覆盖，建区序号在行首次落表时分配、此后不变；`list_for_tree` 按建区序号读出；`delete_for_tree` 清一棵树的行；表缺席显式失败。
+- 账本落表（`scope_tree.py`）：`ScopeTree` 可选装配存储。根行随建树落表；作用域行在首次转为活动时写入，建区中不落表；其后每次行变化随动作落表，废弃换代与组检查点恢复的多行变化同一事务。闸门状态迁移只在内存维护、不落表。
+- 写序（`manager.py`）：废弃与释放改为账面先落表、工作区随后移除；组检查点恢复改为闸门内落当前态、reset、记新头，账面落表后才移除后代工作区。建区意图的元数据去掉属主。
+- 恢复改为对账（`recovery.py` 重写）：从账本表读出该树的全部行装入账本（闸门状态归运行并写回）→ 操作日志三态核对沿用按引用核对，核对通过的操作补账面后果（集成转已集成；恢复目标换代保持活动、后代废弃换代；回退推进根代次并废弃失效集；建区只收口不补行）→ 盘上事实（活动与待集成作用域的工作区目录与分支必须在，否则「作用域损坏」；已释放与已废弃的行工作区仍在盘则按账移除）→ 进程内登记（claims 自检查点行、reader 快照自没有分支段的行）。删除 `_rebuild_records`、`_creating_owners`、`_effective_integrations`、`_infer_root_epoch`、`_scope_start_base` 五段推断代码，以及不再有读取方的 `SagaOplog.all_operations`。
+- 补账幂等（`manager.py`）：`complete_retraction_ledger` 改按账本行状态判定——失效作用域已是已废弃、根行已是推进后的代次即跳过；新增 `complete_integration_ledger`、`complete_restore_ledger`、`restore_reader_scopes`。
+- 树运行时（`tree_runtime.py`）：恒装配账本存储（与检查点账本同库），新增 `close()`；恢复入口改传账本存储，去掉根检出目录与主写者目录两个参数；全新建树前清掉同根残留行。两个平面的关闭点改用 `close()`；会话删除与残留清理器随树删除账本行。
+- 单会话宿主（`session_workspace.py`）：「建区已落账、scope_start 检查点行未落」的半成品改按「主写者名下没有 scope_start 行」识别，废弃换代后重建。
+
+**决策与偏差**
+
+- 写序取「先记意图再动物理」：废弃与释放的账面后果本身就是意图（换代、转已释放都是确定的），先落表再移除工作区。逐操作的崩溃窗口与收口如下，每个窗口恢复后账面都是确定的：
+
+  | 操作 | 写序 | 崩溃窗口与收口 |
+  |---|---|---|
+  | 建树 | 清残留行 → 导入基线 → 根行落表 → 树登记进内存 | 根引用缺失或根行缺席：显式失败，不推断回落 |
+  | 建区 | 意图 → git 建区 → 记新头 → 行写入 → 收口 | 意图后未写：放弃；写了未记新头：父引用头未动，判未生效放弃；已记新头、行未落：只收口不补行；行已落未收口：只收口 |
+  | 集成 | 行转待集成 → 闸门内提交 → 意图 → git 集成 → 记新头 → 行转已集成 → 收口 | 转待集成后崩溃：行即事实，编排层重发；意图后未写：放弃；写了未记新头：判据核验补记新头，行转已集成；行已转未收口：只收口 |
+  | 废弃、释放 | 行落表 → 移除工作区 | 行已落、工作区未移除：恢复按账移除，分支保留 |
+  | 组检查点恢复 | 意图 → 提交当前态 → reset → 记新头 → 行落表（目标换代、后代废弃）→ 移除后代工作区 → 收口 | reset 前崩溃：判未生效放弃；已记新头：补账面后果后收口 |
+  | 集成线回退 | 意图 → 对象库内构造 → 记新头 → 推进引用与根检出 → 根行代次 → 失效行废弃 → 收口 | 记新头后任一点：按已记新头幂等重做推进与补账，根行与失效行已是后果形态即跳过 |
+
+- 组检查点恢复「reset 后、记新头前」的窗口仍按分叉即停：#67 的顺带发现已登记，判据取法（意图里的恢复点）需要设计确认，本次不纳入。它是修复前就有的显式失败，不是落表引入的窗口。
+- 表结构：主键取（根作用域标识, 作用域标识），与规格原文的单列主键不同，已回写。加 `seq` 一列：`created_at` 是微秒精度的时间串，定序靠它不稳；建区序号由存储在首次落表时分配，同键换代重建不变，恢复后各父作用域的子作用域仍按建区序遍历。
+- 重建面装该树的全部行，含子代理作用域，未降级：既有用例没有一个因「孤儿子代理作用域处置、序号下界」失败。子代理行进账本后的两个连带处理：reader 快照按「工作区引用没有分支段」回填登记（否则恢复后的 reader 会被当 writer 走集成），子代理的 ACTIVE 行按盘上核验规则要求工作区在盘。
+- 根行缺席按「建树未完成」显式失败，不做迁移与推断回落（按裁定）。实际命中面：全新建树在树配置落盘后、根行落表前崩溃；分支未发布、没有存量数据。
+- 已释放不再在重启后收敛成已集成（#69 当时沿用推断的口径）：表里记的是 `released` 就还原 `released`。既有用例里相应断言由已集成改为已释放。
+- 「建区已写、账本行未落」维持 #67 的决策，只收口操作不补行；废弃后同键重建在同一窗口崩溃时表里停在已废弃，同样不补——编排层重发建区即可（Graph 换新键，单会话宿主清理半成品）。
+- 闸门状态迁移不落表（验收修订：初版每次迁移落表，按验收意见改掉）：受闸操作每个走三次迁移（静止中 → 已静止 → 运行），副作用屏障、检查点、集成、恢复都因此多三次写库；恢复时闸门状态又一律归 `running`，这些写入没有读取方。行里的闸门状态列只是最近一次因其它字段变化落表时的值（例如闸门内 `set_state` 把已静止带了进去）。崩溃留下的非运行值重建时归 `running` 并写回表，否则恢复后的第一个闸门动作会撞「非法闸门状态迁移」。
+- 存储的可选装配落在 `ScopeTree` 一层：直接使用账本或管理器的调用方（测试的假编排）不装配即只在内存维护，行为不变；两棵生产树都经 `WorkspaceTreeRuntime` 装配，恒有存储。
+- 恢复先对操作日志、再核盘上事实：核对可能改动行（补账、后代废弃），盘上核验要拿对账后的账去比。
+- 回退补账的幂等原来靠异常里的代次判定，实际拦不住重复废弃：崩溃前已废弃的失效作用域再废弃一次会多推进一代。改按行的状态判定，并配一例「失效集废弃到一半时崩溃」的用例守住。
+- 会话删除与残留清理器级联删除账本行：这两处原本就随树删检查点行，账本行是同一棵树的账，不删会留下孤儿行（同会话标识再建树时会被当作残留清掉，但期间占着账面）。run 平面删 run 时的级联（#75）不动。
+- 测试夹具（仅测试）：`build_workspace` 增 `scope_tree` 参数、`FakeOrchestrator.prepare` 增 `owner_ref`；`_CrashSite` 挂账本存储并在 `rebuild()` 后经 `reloaded_ledger` 读表；`_drop_workspace_tree` 改用 `tree.close()`。
+- 既有用例结论变化（都属于「推断 → 对账」带来的正确行为变化）：`test_recovery_rebuilds_ledger_from_checkpoints_and_repo` 改名为 `test_recovery_rebuilds_ledger_from_ledger_table`，已释放作用域的断言由已集成改为已释放；`test_recovery_rebuilds_integrated_scope_as_integrated` 改名 `test_recovery_keeps_integrated_scope_state`，释放后断言已释放；两个回退崩溃补账用例里 `node-b`、`node-w1` 的断言由已集成改为已释放；`test_recovery_completes_empty_only_retract_without_epoch_advance` 改用 `crash_at` 并补工作区已移除的断言；`test_list_run_scopes_rebuilds_tree_left_only_on_disk` 改到重试现场（已废弃 + 活动），与重启前逐字段比对；残留清理用例补账本行的铺设与删除断言。
+- 文档：本地阅读笔记 `docs/local/traceback-code-reading-guide.md`（不入库）里账本持久化、管理器写序、深度恢复、单会话重开四处表述随实现更新。实施计划与开发日志里的历史记录不改。
+
+**验证**
+
+`packages/kernel/kernel_tests/workspace/test_scope_ledger.py`（真实 git）：
+
+- `TestSchemaMigration::test_migration_creates_scopes_table_and_stamps_version`：统一迁移建 `scopes` 表，列序与复合主键如规格，盖 v7。
+- `TestSchemaMigration::test_previous_version_db_upgraded_in_one_step`：上一档库重开一步升档，重放幂等、已写的行不漂。
+- `TestSchemaMigration::test_ledger_requires_migrated_table`：表缺席显式失败。
+- `TestLedgerRows::test_rows_follow_manager_actions`：建区、集成、废弃、释放、恢复之后，新连接读出的行与内存账本一致（闸门状态列按稳态看），按建区序存放。
+- `TestLedgerRows::test_trees_are_isolated_by_root_scope`：同库两棵树的同名作用域互不干扰，同键换代重建不改建区序号，删树只删本树的行。
+
+`packages/kernel/kernel_tests/workspace/test_recovery.py`（真实 git）：
+
+- `test_recovery_rebuilds_ledger_from_ledger_table`：各状态取自账本表，claims 复登记，活动组内存态显式降级，重建后可继续建区。
+- `test_recovery_keeps_integrated_scope_state`（参数化三例）：已集成作用域重启后状态不变——工作区保留的停在已集成，释放后的停在已释放。
+- `test_recovery_reloads_every_scope_unchanged`：活动、待集成、已集成（工作区保留）、已释放、已废弃、冲突、带属主的子代理、reader 快照、废弃后同键重建九种形态，重启后逐字段与重启前一致，遍历序一致，reader 登记恢复。
+- `test_recovery_keeps_epochs_after_completed_retraction`：回退完成后重启，失效作用域的代次是回退后的值、根代次为 2。
+- `test_recovery_completes_retract_after_partial_invalidation_crash`：回退在失效集废弃到一半时崩溃，已废弃的不重复换代，其余补账，两个工作区都已移除。
+- `test_recovery_completes_retract_ledger_after_reset_crash`、`test_recovery_completes_multi_target_retract_after_crash`、`test_recovery_completes_empty_only_retract_without_epoch_advance`：既有的回退补账用例，改由表承载后原结论成立。
+- `test_recovery_completes_prepare_written_before_ledger`（参数化两例）：建区已写未落账只收口不补行——首次建区没有行，同键重建停在已废弃、代次 2。
+- `test_recovery_reconciles_restore_against_scope_branch`（参数化两例）：reset 前崩溃判未生效放弃、代次不动；已记新头补代次，目标代次 2 保持活动。
+- `test_recovery_reconciles_integration_against_parent_ref`（参数化 2×3）：核对通过的作用域行转已集成，未生效的留在待集成。
+- `test_recovery_prunes_workspace_left_after_ledger_write`（参数化两例：废弃、释放）：账面已落、工作区移除前崩溃，恢复按账移除工作区，分支保留。
+- `test_recovery_fails_when_live_workspace_is_gone`（参数化两例：目录、分支）：活动作用域的工作区不在盘，报「作用域损坏」。
+- `test_recovery_fails_when_root_row_is_missing`：根行缺席，报「建树未完成」。
+- `test_recovery_resets_gate_state_left_by_crash`：集成在闸门内把行转已集成、收口前崩溃，行里的闸门状态停在已静止；重建归运行并写回表，此后的闸门动作照常。
+
+协调器层 `packages/kernel/kernel_tests/unit/run_plane/test_dispatch_barrier_chain.py::test_list_run_scopes_rebuilds_tree_left_only_on_disk`：节点重试现场（旧作用域已废弃、新作用域活动）树只在盘上，作用域查询重建后返回的行与重启前逐字段一致。
+
+`packages/kernel/kernel_tests/workspace/test_residue_reaper.py::test_reaps_crash_residual_tree_and_rows`：残留树回收时检查点行与账本行一并删除。单会话 `test_crash_window_between_prepare_and_checkpoint_row`、`test_reopen_after_terminal_integration_rebuilds_main_writer` 两个既有用例按新机制原结论通过。
+
+修复前失败：两个新测试模块在修复前源码上导入即失败——`ModuleNotFoundError: No module named 'workflow_controller.core.workspace.scope_ledger'`（结构性缺失）。行为面的修复前证据取自上面根因里的一次性探针（修复前源码跑同一现场，重启后五个作用域的状态、代次或分支与重启前不一致；修复后无差异，探针跑完即删）。
+
+变异验证（临时改一处源码、只跑对应用例、跑完还原，共十处，全部被守住）：恢复不补账面后果 → `test_recovery_reconciles_integration_against_parent_ref` 实得 `awaiting_integration`；账本不落表 → `test_rows_follow_manager_actions`、`test_recovery_reloads_every_scope_unchanged` 失败；废弃或释放回到「先物理后账面」→ `test_recovery_prunes_workspace_left_after_ledger_write` 对应例失败；回退补账幂等退回按异常代次判定 → `test_recovery_completes_retract_after_partial_invalidation_crash` 失败；恢复不核根行、不核盘上事实、不回收残留工作区、不回填 reader 登记、不归零闸门状态 → 各自对应用例失败。
+
+另跑离线冒烟 `packages/kernel/kernel_tests/regression/traceback_live/test_offline_smoke.py`（`--live`，真实捆绑 CLI 加脚本化模型）7 例通过，含进程强杀后的冷恢复复用会话。
+
+门禁（最终代码上）：`ruff format --check` 430 个文件已格式化、`ruff check` 全过、`lint-imports` 4 条契约保持 0 破坏、`codespell`（全部 git 跟踪的 markdown）无命中；全量 pytest 2887 通过、25 跳过（基线 2873 通过 + 新增 14 例），2 条告警为 breather 插件既有告警；`uv build --package workflow-controller-kernel` 与 `--package workflow-controller-plugin-graph` 的 sdist 与 wheel 构建成功（graph 插件源码未改动，因测试有改动一并构建核对）。
+
+**顺带发现**
+
+- 建区已收口、scope_start 检查点行未落时崩溃（走读）：Graph 平面重启后该作用域以活动态留在账本里，编排层没有收到建区回执、换新键重发，旧行与旧工作区无人回收；按属主定位的屏障与产物读取会走到「多个活动作用域取最近建立的一个」分支并留告警。修复前同一窗口是账本里没有这行、只留孤儿工作区。与 #74（孤儿子代理作用域处置）、#75（树与表行的回收）同族，未处理。
+- 重启前派发过 writer 子代理的节点，重启后再次 task 派发仍被拒（#63 登记的过渡行为），拒绝原因由「已生效操作不可放弃：dispatch-1（committed）」变成「作用域标识已被占用」——子代理作用域现在进账本。#74 修复后解除。
+- reader 快照建区不经操作日志：「工作区已建、账本行未落」的崩溃窗留下无账的 detached 工作区（#69 已登记，仍成立），归 #74。
+- 单会话终态同步干净后只回收树目录，检查点行与账本行留在表里（检查点行是既有行为，账本行随同一处）；会话删除路径与残留清理器会删。留存行无害，#75 一并考虑。
 
 ## 跳过与延期
 
