@@ -87,13 +87,18 @@ reviewer 走 `AnthropicHttpDriver`（裸 HTTP 单次调用、temp=0、无 agent 
 4. 跑 `.venv/bin/pytest tests/regression/reviewer/test_reviewer_replay.py -q`（非实时，
    只验 fixture 结构 + 驱动逻辑）；改了 prompt 则加 `--live` 跑真实 LLM。
 
+> `.github/workflows/live-llm.yml` 按 pytest 节点 ID 选择 fixture 13。若对 fixture 13 重命名或重新编号，须同步更新工作流里的节点 ID。
+
 ## CI 并行配置
 
 在 GitHub 的 `live-llm` Environment 中设置必填变量 `LIVE_LLM_ANTHROPIC_MODELS`。
 可填写一个模型 ID，或用逗号或换行分隔多个模型 ID（兼容 CRLF，回车符会被剥离）。
-每个模型独立运行完整回放套件，共用同一端点和凭证。日志按模型展示，所有模型均通过时检查才通过。
+CI 对每个配置的模型只运行 fixture 13，回放 5 次，每次均须满足断言。
+fixture 14 的实模结果尚不稳定，暂时通过手动回放验证。
+实模全量回放需手动执行 `uv run pytest --live packages/kernel/kernel_tests/regression/reviewer/`。
+日志按模型展示，所有模型均通过时 `live-llm` 检查才通过。
 
-并行运行时所有模型共用同一端点与凭证，每个凭证的速率限制（429 / 重试预算）也是共享的：
-模型越多，整体墙钟越可能超过单模型串行最坏值（12 个 fixture × 单次 300s × 重试 1 次 ≈ 120min）。
-因此作业 `timeout-minutes` 上调为 240min；继续增加模型数时应同步评估是否再上调。
+并行运行时所有模型共用同一端点、凭证和速率限制。回放测试用 `DriverReviewerRunner()` 构造，
+429 或超时直接抛错。单模型共 5 次调用，按单次超时 300s 估算约 25min。
+作业保留 240min 的超时预算。
 作业超时或被取消时，步骤会先打印各模型已产生的部分日志再清理临时文件，避免长作业中断后无线索。
