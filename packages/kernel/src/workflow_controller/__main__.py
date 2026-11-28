@@ -170,7 +170,7 @@ def cmd_run(
     import asyncio
 
     click.echo(json.dumps({"event": "info", "msg": f"Logging to {log_path}"}))
-    from workflow_controller.headless import HeadlessRunner
+    from workflow_controller.headless import BootExitError, HeadlessRunner
 
     runner = HeadlessRunner(
         app_cfg,
@@ -180,6 +180,8 @@ def cmd_run(
     )
     try:
         asyncio.run(runner.run())
+    except BootExitError as exc:
+        raise click.exceptions.Exit(exc.exit_code) from None
     finally:
         asyncio.run(runner.shutdown())
 
